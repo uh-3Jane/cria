@@ -5,7 +5,7 @@ import { enrichGithubUrl } from "../integrations/github";
 import { analyzeMessages } from "../scanner/analyzer";
 import { groupAcrossScan, groupWithinScan } from "../scanner/dedup";
 import { fetchGuildMessages } from "../scanner/fetcher";
-import { createScan, failScan, finalizeScan, getActiveCategoryNames, getChannelScanCursors, getItem, getOpenItemsInLookback, getScanChannel, getScannedMessages, isIgnoredCandidate, listAdmins, listAllCategoryAssigneeIds, recordScannedMessages, recoverStaleScans, updateChannelScanCursors, updateItemGithubMetadata, upsertIssue, updateHumanReply } from "../issues/store";
+import { createScan, failScan, finalizeScan, getActiveCategoryNames, getChannelScanCursors, getChatEngagedMessageIds, getItem, getOpenItemsInLookback, getScanChannel, getScannedMessages, isIgnoredCandidate, listAdmins, listAllCategoryAssigneeIds, recordScannedMessages, recoverStaleScans, updateChannelScanCursors, updateItemGithubMetadata, upsertIssue, updateHumanReply } from "../issues/store";
 import { bindSummaryMessage, createDigestSession, replaceSessionCards, summaryMessagePayload } from "../issues/digest";
 import type { FetchedMessage, GithubEnrichment, NormalizedIssueInput, RenderedItem, ScanSummary } from "../types";
 import { hoursFromPeriod } from "../utils/time";
@@ -317,10 +317,15 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
     ]);
     const activeCategories = getActiveCategoryNames(interaction.guildId);
     const cachedMessages = getScannedMessages(interaction.guildId, fetched.messages.map((message) => message.messageId));
+    const chatEngagedMessageIds = getChatEngagedMessageIds(interaction.guildId, fetched.messages.map((message) => message.messageId));
     const candidateMessages = fetched.messages.filter((message) => {
+      if (chatEngagedMessageIds.has(message.messageId)) {
+        return false;
+      }
       const cached = cachedMessages.get(message.messageId);
       return !cached || cached.content_fingerprint !== contentFingerprint(message.content);
     });
+    const messagesSkippedAsChatEngaged = fetched.messages.filter((message) => chatEngagedMessageIds.has(message.messageId));
     const messagesSkippedAsVague = candidateMessages.filter((message) => isLowSignalHelpMessage(message.content));
     const messagesToAnalyze = candidateMessages.filter((message) => !isLowSignalHelpMessage(message.content));
     const messagesReused = fetched.messages.length - candidateMessages.length;
@@ -331,12 +336,13 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
       skippedChannels: fetched.skippedChannels,
       messagesFetched: fetched.messages.length,
       messagesReused,
+      messagesSkippedAsChatEngaged: messagesSkippedAsChatEngaged.length,
       messagesSkippedAsVague: messagesSkippedAsVague.length,
       messagesToAnalyze: messagesToAnalyze.length
     });
     await updateProgress(
       interaction,
-      `scanning last ${lookbackHours}h...\nfetched ${fetched.messages.length.toLocaleString()} messages from ${fetched.channelsScanned} channels.\nreused ${messagesReused.toLocaleString()} cached messages.\nskipped ${messagesSkippedAsVague.length.toLocaleString()} vague help messages.\nresults: ${outputLabel}`
+      `scanning last ${lookbackHours}h...\nfetched ${fetched.messages.length.toLocaleString()} messages from ${fetched.channelsScanned} channels.\nreused ${messagesReused.toLocaleString()} cached messages.\nskipped ${messagesSkippedAsChatEngaged.length.toLocaleString()} chat-engaged messages.\nskipped ${messagesSkippedAsVague.length.toLocaleString()} vague help messages.\nresults: ${outputLabel}`
     );
     const analyzedResult = messagesToAnalyze.length === 0
       ? { items: [], skippedBatches: 0 }
@@ -350,7 +356,7 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
       });
       await updateProgress(
         interaction,
-        `scanning last ${lookbackHours}h...\nfetched ${fetched.messages.length.toLocaleString()} messages from ${fetched.channelsScanned} channels.\nreused ${messagesReused.toLocaleString()} cached messages.\nskipped ${messagesSkippedAsVague.length.toLocaleString()} vague help messages.\nanalyzing ${messagesToAnalyze.length.toLocaleString()} new/changed messages (batch ${current}/${total})...\nresults: ${outputLabel}`
+        `scanning last ${lookbackHours}h...\nfetched ${fetched.messages.length.toLocaleString()} messages from ${fetched.channelsScanned} channels.\nreused ${messagesReused.toLocaleString()} cached messages.\nskipped ${messagesSkippedAsChatEngaged.length.toLocaleString()} chat-engaged messages.\nskipped ${messagesSkippedAsVague.length.toLocaleString()} vague help messages.\nanalyzing ${messagesToAnalyze.length.toLocaleString()} new/changed messages (batch ${current}/${total})...\nresults: ${outputLabel}`
       );
     });
     const grouped = groupAcrossScan(groupWithinScan(analyzedResult.items, messagesById), messagesById);

@@ -403,6 +403,64 @@ export function listChatChannels(guildId: string): string[] {
   );
 }
 
+export function recordChatEngagement(args: {
+  guildId: string;
+  channelId: string;
+  userId: string;
+  userMessageId: string;
+  botReplyMessageId: string;
+  anchorMessageId?: string | null;
+}): void {
+  db.query(
+    `INSERT OR REPLACE INTO chat_engagements (
+        guild_id,
+        channel_id,
+        user_id,
+        user_message_id,
+        bot_reply_message_id,
+        anchor_message_id
+      ) VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    args.guildId,
+    args.channelId,
+    args.userId,
+    args.userMessageId,
+    args.botReplyMessageId,
+    args.anchorMessageId ?? null
+  );
+}
+
+export function getChatEngagedMessageIds(guildId: string, messageIds: string[]): Set<string> {
+  if (messageIds.length === 0) {
+    return new Set();
+  }
+  const placeholders = messageIds.map(() => "?").join(", ");
+  const rows = db.query(
+    `SELECT user_message_id, bot_reply_message_id, anchor_message_id
+       FROM chat_engagements
+      WHERE guild_id = ?
+        AND (
+          user_message_id IN (${placeholders})
+          OR bot_reply_message_id IN (${placeholders})
+          OR anchor_message_id IN (${placeholders})
+        )`
+  ).all(guildId, ...messageIds, ...messageIds, ...messageIds) as Array<{
+    user_message_id: string;
+    bot_reply_message_id: string;
+    anchor_message_id: string | null;
+  }>;
+
+  const engaged = new Set<string>();
+  for (const row of rows) {
+    engaged.add(row.user_message_id);
+    engaged.add(row.bot_reply_message_id);
+    if (row.anchor_message_id) {
+      engaged.add(row.anchor_message_id);
+    }
+  }
+  return engaged;
+}
+
 export function createScan(guildId: string, triggeredBy: string, lookbackHours: number): number {
   db.query(
     `INSERT INTO scans (guild_id, triggered_by, lookback_hours, channels_scanned, messages_fetched, messages_reused, messages_analyzed, items_found, items_new, items_returning)
@@ -756,7 +814,10 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
     const item = rowToItem(raw);
     const related = relatedByItemId.get(item.id) ?? [];
     const firstReportedAt = related[0]?.source_message_created_at ?? related[0]?.created_at ?? item.source_message_created_at ?? item.created_at;
-    const projectName = extractProjectName(`${item.summary} ${item.content_preview}`);
+    const projectNameSource = item.github_url || extractGithubUrl(item.content_preview)
+      ? item.content_preview
+      : `${item.summary} ${item.content_preview}`;
+    const projectName = extractProjectName(projectNameSource);
     return {
       ...item,
       relatedCount: Math.max(0, related.length - 1),

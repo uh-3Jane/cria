@@ -118,6 +118,17 @@ export function migrate(): void {
       UNIQUE(guild_id, channel_id)
     );
 
+    CREATE TABLE IF NOT EXISTS chat_engagements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      user_message_id TEXT NOT NULL UNIQUE,
+      bot_reply_message_id TEXT NOT NULL UNIQUE,
+      anchor_message_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS categories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       guild_id TEXT NOT NULL,
@@ -188,6 +199,8 @@ export function migrate(): void {
     CREATE INDEX IF NOT EXISTS idx_scanned_messages_item_id ON scanned_messages(item_id);
     CREATE INDEX IF NOT EXISTS idx_channel_scan_cursors_guild_channel ON channel_scan_cursors(guild_id, channel_id);
     CREATE INDEX IF NOT EXISTS idx_chat_channels_guild ON chat_channels(guild_id);
+    CREATE INDEX IF NOT EXISTS idx_chat_engagements_guild_user_message ON chat_engagements(guild_id, user_message_id);
+    CREATE INDEX IF NOT EXISTS idx_chat_engagements_guild_anchor_message ON chat_engagements(guild_id, anchor_message_id);
   `);
 
   if (!hasColumn("guild_config", "scan_emissions_channel_id")) {
