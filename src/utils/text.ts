@@ -65,6 +65,11 @@ export function extractGithubUrl(text: string): string | null {
   return match ?? null;
 }
 
+export function extractGithubUrls(text: string): string[] {
+  const matches = text.match(/https?:\/\/github\.com\/[^\s)]+/gi) ?? [];
+  return Array.from(new Set(matches));
+}
+
 export function extractGithubPullKey(text: string): string | null {
   const url = extractGithubUrl(text);
   if (!url) {
@@ -215,6 +220,43 @@ export function isLowSignalHelpMessage(text: string): boolean {
 
   const tokens = normalized.split(/\s+/).filter(Boolean);
   if (tokens.length <= 4 && tokens.some((token) => token === "help" || token === "assist" || token === "support")) {
+    return true;
+  }
+
+  return false;
+}
+
+export function isLowSignalKnowledgeReply(text: string): boolean {
+  const normalized = text
+    .toLowerCase()
+    .replace(/<@!?\d+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) {
+    return true;
+  }
+
+  const exactPhrases = new Set([
+    "checking",
+    "looking",
+    "looking now",
+    "on it",
+    "will check",
+    "checking now",
+    "fixed",
+    "done",
+    "resolved",
+    "ok",
+    "okay",
+    "thanks"
+  ]);
+  if (exactPhrases.has(normalized)) {
+    return true;
+  }
+
+  const tokens = tokenize(normalized);
+  if (tokens.length <= 3) {
     return true;
   }
 

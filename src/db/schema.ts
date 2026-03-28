@@ -194,6 +194,28 @@ export function migrate(): void {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS knowledge_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      conversation_key TEXT NOT NULL,
+      question_message_id TEXT NOT NULL,
+      answer_message_id TEXT NOT NULL,
+      question_author_id TEXT NOT NULL,
+      question_author_name TEXT NOT NULL,
+      answer_author_id TEXT NOT NULL,
+      answer_author_name TEXT NOT NULL,
+      question_text TEXT NOT NULL,
+      context_text TEXT,
+      answer_text TEXT NOT NULL,
+      combined_text TEXT NOT NULL,
+      content_fingerprint TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'live',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(guild_id, answer_message_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_items_guild_status ON items(guild_id, status);
     CREATE INDEX IF NOT EXISTS idx_items_message_id ON items(message_id);
     CREATE INDEX IF NOT EXISTS idx_items_author_category ON items(author_id, category);
@@ -207,6 +229,8 @@ export function migrate(): void {
     CREATE INDEX IF NOT EXISTS idx_chat_channels_guild ON chat_channels(guild_id);
     CREATE INDEX IF NOT EXISTS idx_chat_engagements_guild_user_message ON chat_engagements(guild_id, user_message_id);
     CREATE INDEX IF NOT EXISTS idx_chat_engagements_guild_anchor_message ON chat_engagements(guild_id, anchor_message_id);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_documents_guild_updated ON knowledge_documents(guild_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_documents_guild_question ON knowledge_documents(guild_id, question_message_id);
   `);
 
   if (!hasColumn("guild_config", "scan_emissions_channel_id")) {

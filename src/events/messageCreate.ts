@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ChannelType, type Client, type Message } from "discord.js";
+import { ChannelType, type Client, type GuildMember, type Message } from "discord.js";
 import { findChatConversation, isChatEnabled, listChatChannels, recordChatEngagement } from "../issues/store";
+import { findKnowledgeMatches, upsertKnowledgeDocument } from "../knowledge/store";
 import { completeJson } from "../llm/client";
 import { enrichGithubUrl } from "../integrations/github";
 import { logDebug, logError } from "../utils/logger";
-import { extractDefillamaEntityUrl, extractGithubUrl, preview } from "../utils/text";
+import { extractDefillamaEntityUrl, extractGithubUrls, isLowSignalKnowledgeReply, preview } from "../utils/text";
 import type { ChatClassification, ChatConfidence, GithubEnrichment } from "../types";
 
 const SUPPORT_EMAIL = "support@defillama.com";
@@ -26,6 +27,8 @@ const CHAT_TRAINING_MAX_DOCS_CHARS = 1800;
 const CHAT_TRAINING_MAX_EXPORT_CHARS = 2200;
 const CHAT_TRAINING_DOCS_PATH = resolve(process.cwd(), "docs/chat_training_docs.md");
 const CHAT_TRAINING_EXPORT_PATH = resolve(process.cwd(), "docs/chat_training_export.md");
+const LLAMA_ROLE_NAME = "llama";
+const CHAT_KNOWLEDGE_MATCH_LIMIT = 3;
 const CHAT_KNOWLEDGE = [
   `DefiLlama support email is ${SUPPORT_EMAIL}.`,
   "If someone asks how to contact support or which email to use, give that email directly.",
@@ -220,6 +223,32 @@ async function getGithubEnrichmentCached(url: string): Promise<GithubEnrichment 
   return enrichment;
 }
 
+async function getGithubSummaries(urls: string[]): Promise<string[]> {
+  const summaries = await Promise.all(
+    urls.slice(0, 4).map(async (url) => {
+      try {
+        const github = await getGithubEnrichmentCached(url);
+        if (!github) {
+          return null;
+        }
+        return [
+          `${github.url}`,
+          `${github.repoLabel} ${github.refLabel}`,
+          github.status ? `status: ${github.status}` : null,
+          github.assigneeHint ? `assigned: ${github.assigneeHint}` : null,
+          github.ownerHint ? `recent participant: ${github.ownerHint}` : null,
+          github.lastActivityAt ? `last updated: ${github.lastActivityAt}` : null
+        ].filter(Boolean).join(" | ");
+      } catch (error) {
+        logError("chat.github.enrich.failed", error, { url });
+        return null;
+      }
+    })
+  );
+
+  return summaries.filter((summary): summary is string => Boolean(summary));
+}
+
 function buildChatPrompt(args: {
   authorId: string;
   authorName: string;
@@ -229,11 +258,12 @@ function buildChatPrompt(args: {
   anchorAuthorName?: string;
   context: string[];
   conversation: string[];
-  githubUrl: string | null;
-  githubSummary: string | null;
+  githubUrls: string[];
+  githubSummaries: string[];
   defillamaUrl: string | null;
   trainingDocs: string | null;
   trainingExamples: string | null;
+  knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string }>;
 }): { system: string; user: string } {
     const system = [
     "You are Cria, a public-facing DefiLlama Discord helper.",
@@ -248,6 +278,8 @@ function buildChatPrompt(args: {
     "Treat the primary message as the main task. Do not let unrelated nearby channel chatter override it.",
     "Use recent local context only when it clearly matches the same request or reply-chain topic.",
     "If GitHub metadata is provided, use it to answer naturally and accurately.",
+    "If the message contains multiple GitHub links, consider all provided GitHub metadata before replying.",
+    "If GitHub metadata includes merged/open/draft status, recent participant, or assignee details, use that directly instead of giving a generic answer.",
     "If GitHub metadata includes an assignee, mention who is assigned.",
     "Never invent or guess a repository name, pull request, file path, or implementation workflow.",
     "If a user asks how to update their website, fees, TVL, app metadata, UI, or logo, use the known repository mapping when it clearly applies.",
@@ -259,6 +291,10 @@ function buildChatPrompt(args: {
     `Known support facts: ${CHAT_KNOWLEDGE.join(" ")}`,
     args.trainingDocs ? `Docs guidance: ${args.trainingDocs}` : null,
     args.trainingExamples ? `Recent Discord pairs (user -> team): ${args.trainingExamples}` : null,
+    args.knowledgeMatches.length > 0
+      ? `Trusted llama support precedents: ${args.knowledgeMatches.map((match, index) => `${index + 1}. Question: ${match.questionText} Answer by ${match.answerAuthorName}: ${match.answerText}`).join(" ")}`
+      : null,
+    "Use trusted llama precedents only as support context. Reuse them when they clearly fit, otherwise ask a clarifying question.",
     "Return JSON only with keys: classification, reply, needs_clarification, confidence.",
     "classification must be one of: support_request, repo_followup, listing_help, data_update_question, logo_update_question, out_of_scope, needs_clarification.",
     "reply must be plain text suitable for posting in a public Discord channel.",
@@ -274,13 +310,89 @@ function buildChatPrompt(args: {
     `Primary message: ${args.anchor}`,
     args.invocation && args.invocation !== args.anchor ? `Invocation wrapper: ${args.invocation}` : null,
     args.conversation.length > 0 ? `Reply-chain conversation:\n${args.conversation.join("\n")}` : null,
-    args.githubUrl ? `GitHub link: ${args.githubUrl}` : null,
-    args.githubSummary ? `GitHub metadata: ${args.githubSummary}` : null,
+    args.githubUrls.length > 0 ? `GitHub links:\n${args.githubUrls.join("\n")}` : null,
+    args.githubSummaries.length > 0 ? `GitHub metadata:\n${args.githubSummaries.join("\n")}` : null,
     args.defillamaUrl ? `DefiLlama link: ${args.defillamaUrl}` : null,
     args.context.length > 0 ? `Recent local context:\n${args.context.join("\n")}` : null
   ].filter(Boolean).join("\n\n");
 
   return { system, user };
+}
+
+async function getMessageMember(message: Message): Promise<GuildMember | null> {
+  if (message.member) {
+    return message.member;
+  }
+  if (!message.guild) {
+    return null;
+  }
+  try {
+    return await message.guild.members.fetch(message.author.id);
+  } catch {
+    return null;
+  }
+}
+
+async function hasLlamaRole(message: Message): Promise<boolean> {
+  const member = await getMessageMember(message);
+  if (!member) {
+    return false;
+  }
+  return member.roles.cache.some((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME);
+}
+
+function buildKnowledgeContext(message: Message, chain: Message[]): string | null {
+  const lines = [...chain]
+    .reverse()
+    .filter((entry) => !entry.author.bot)
+    .slice(-3)
+    .map((entry) => `${entry.author.username}: ${preview(entry.content, 250)}`);
+  return lines.length > 0 ? lines.join("\n") : null;
+}
+
+async function recordLlamaKnowledge(message: Message): Promise<void> {
+  if (!message.guildId || !message.reference?.messageId || isLowSignalKnowledgeReply(message.content)) {
+    return;
+  }
+
+  const isLlama = await hasLlamaRole(message);
+  if (!isLlama) {
+    return;
+  }
+
+  const chain = await replyChain(message);
+  const question = chain.find((entry) => !entry.author.bot && entry.author.id !== message.author.id) ?? null;
+  if (!question) {
+    return;
+  }
+  if (await hasLlamaRole(question)) {
+    return;
+  }
+
+  const conversationKey = question.id;
+  const contextText = buildKnowledgeContext(question, chain.filter((entry) => entry.id !== question.id));
+  const id = upsertKnowledgeDocument({
+    guildId: message.guildId,
+    channelId: message.channelId,
+    conversationKey,
+    questionMessageId: question.id,
+    answerMessageId: message.id,
+    questionAuthorId: question.author.id,
+    questionAuthorName: question.author.username,
+    answerAuthorId: message.author.id,
+    answerAuthorName: message.author.username,
+    questionText: question.content,
+    contextText,
+    answerText: message.content,
+    source: "live"
+  });
+  logDebug("chat.knowledge.recorded", {
+    guildId: message.guildId,
+    channelId: message.channelId,
+    knowledgeId: id,
+    questionMessageId: question.id,
+    answerMessageId: message.id
+  });
 }
 
 async function routeChatReply(
@@ -299,36 +411,20 @@ async function routeChatReply(
     .map((entry) => `${entry.author.username}: ${entry.content}`)
     .slice(-CHAT_CONTEXT_LIMIT);
   const combined = [anchor, invocation, ...conversation].filter(Boolean).join("\n");
-  const githubUrl = extractGithubUrl(combined);
+  const githubUrls = extractGithubUrls(combined);
   const defillamaUrl = extractDefillamaEntityUrl(combined);
-
-  let githubSummary: string | null = null;
-  if (githubUrl) {
-    try {
-      const github = await getGithubEnrichmentCached(githubUrl);
-      if (github) {
-        githubSummary = [
-          `${github.repoLabel} ${github.refLabel}`,
-          github.status ? `status: ${github.status}` : null,
-          github.assigneeHint ? `assigned: ${github.assigneeHint}` : null,
-          github.ownerHint ? `recent participant: ${github.ownerHint}` : null,
-          github.lastActivityAt ? `last updated: ${github.lastActivityAt}` : null
-        ].filter(Boolean).join(" | ");
-      }
-    } catch (error) {
-      logError("chat.github.enrich.failed", error, {
-        guildId: message.guildId,
-        channelId: message.channelId,
-        messageId: message.id,
-        githubUrl
-      });
-    }
-  }
+  const githubSummaries = await getGithubSummaries(githubUrls);
 
   const useRecentLocalContext = Boolean(trigger.replyChain.length > 0 || trigger.isContinuation);
   const context = await recentContext(message, useRecentLocalContext);
   const trainingDocs = loadTrainingNotes(CHAT_TRAINING_DOCS_PATH, CHAT_TRAINING_MAX_DOCS_CHARS);
   const trainingExamples = loadTrainingNotes(CHAT_TRAINING_EXPORT_PATH, CHAT_TRAINING_MAX_EXPORT_CHARS, true);
+  const knowledgeMatches = findKnowledgeMatches({
+    guildId: message.guildId!,
+    query: combined,
+    excludeMessageIds: [message.id, ...trigger.replyChain.map((entry) => entry.id)],
+    limit: CHAT_KNOWLEDGE_MATCH_LIMIT
+  });
   const prompt = buildChatPrompt({
     authorId: message.author.id,
     authorName: message.author.username,
@@ -338,11 +434,12 @@ async function routeChatReply(
     anchorAuthorName: immediateReply?.author.username,
     context,
     conversation,
-    githubUrl,
-    githubSummary,
+    githubUrls,
+    githubSummaries,
     defillamaUrl,
     trainingDocs,
-    trainingExamples
+    trainingExamples,
+    knowledgeMatches
   });
 
   const decision = parseChatDecision(await completeJson(prompt.system, prompt.user));
@@ -378,12 +475,22 @@ export function registerMessageCreateHandler(client: Client): void {
         processedMessageIds.delete(key);
       }
     }
-    if (!isChatEnabled(message.guildId)) {
+    const allowedChannelIds = new Set(listChatChannels(message.guildId));
+    if (allowedChannelIds.size === 0 || !isAllowedChannel(message, allowedChannelIds)) {
       return;
     }
 
-    const allowedChannelIds = new Set(listChatChannels(message.guildId));
-    if (allowedChannelIds.size === 0 || !isAllowedChannel(message, allowedChannelIds)) {
+    try {
+      await recordLlamaKnowledge(message);
+    } catch (error) {
+      logError("chat.knowledge.capture_failed", error, {
+        guildId: message.guildId,
+        channelId: message.channelId,
+        messageId: message.id
+      });
+    }
+
+    if (!isChatEnabled(message.guildId)) {
       return;
     }
 

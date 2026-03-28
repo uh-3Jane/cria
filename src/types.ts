@@ -224,3 +224,33 @@ export interface CategoryAssigneeRow {
   user_name: string;
   created_at: string;
 }
+
+export interface KnowledgeDocumentRow {
+  id: number;
+  guild_id: string;
+  channel_id: string;
+  conversation_key: string;
+  question_message_id: string;
+  answer_message_id: string;
+  question_author_id: string;
+  question_author_name: string;
+  answer_author_id: string;
+  answer_author_name: string;
+  question_text: string;
+  context_text: string | null;
+  answer_text: string;
+  combined_text: string;
+  content_fingerprint: string;
+  source: "live" | "backfill";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeMatch {
+  id: number;
+  questionText: string;
+  contextText: string | null;
+  answerText: string;
+  answerAuthorName: string;
+  score: number;
+}
