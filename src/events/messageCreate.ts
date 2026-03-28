@@ -6,7 +6,7 @@ import { findKnowledgeMatches, upsertKnowledgeDocument } from "../knowledge/stor
 import { completeJson } from "../llm/client";
 import { enrichGithubUrl } from "../integrations/github";
 import { logDebug, logError } from "../utils/logger";
-import { extractDefillamaEntityUrl, extractGithubUrls, isLowSignalKnowledgeReply, preview } from "../utils/text";
+import { extractDefillamaEntityUrl, extractGithubUrls, isLowSignalKnowledgeReply, preview, sharedTokenCount } from "../utils/text";
 import type { ChatClassification, ChatConfidence, GithubEnrichment } from "../types";
 
 const SUPPORT_EMAIL = "support@defillama.com";
@@ -24,11 +24,15 @@ const CHAT_REPLY_CHAIN_LIMIT = 3;
 const CHAT_GITHUB_CACHE_MS = 6 * 60 * 60 * 1000;
 const CHAT_TRAINING_CACHE_MS = 5 * 60 * 1000;
 const CHAT_TRAINING_MAX_DOCS_CHARS = 1800;
+const CHAT_TRAINING_MAX_EXAMPLES_CHARS = 4_000;
 const CHAT_TRAINING_MAX_EXPORT_CHARS = 2200;
 const CHAT_TRAINING_DOCS_PATH = resolve(process.cwd(), "docs/chat_training_docs.md");
+const CHAT_TRAINING_EXAMPLES_PATH = resolve(process.cwd(), "docs/chat_training_examples.md");
 const CHAT_TRAINING_EXPORT_PATH = resolve(process.cwd(), "docs/chat_training_export.md");
 const LLAMA_ROLE_NAME = "llama";
 const CHAT_KNOWLEDGE_MATCH_LIMIT = 3;
+const CHAT_FAQ_MATCH_LIMIT = 3;
+const CHAT_EXAMPLE_MATCH_LIMIT = 2;
 const CHAT_KNOWLEDGE = [
   `DefiLlama support email is ${SUPPORT_EMAIL}.`,
   "If someone asks how to contact support or which email to use, give that email directly.",
@@ -210,6 +214,49 @@ function loadTrainingNotes(path: string, maxChars: number, takeTail = false): st
   return content;
 }
 
+function pickRelevantSections(args: {
+  raw: string | null;
+  query: string;
+  splitter: RegExp;
+  limit: number;
+  minScore: number;
+}): string[] {
+  if (!args.raw) {
+    return [];
+  }
+  return args.raw
+    .split(args.splitter)
+    .map((section) => section.trim())
+    .filter(Boolean)
+    .map((section) => ({
+      section,
+      score: sharedTokenCount(args.query, section)
+    }))
+    .filter((entry) => entry.score >= args.minScore)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, args.limit)
+    .map((entry) => preview(entry.section.replace(/\s+/g, " "), 700));
+}
+
+function pickRelevantFaqSnippets(raw: string | null, query: string): string[] {
+  if (!raw) {
+    return [];
+  }
+  const candidates = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "));
+  return candidates
+    .map((line) => ({
+      line: line.slice(2).trim(),
+      score: sharedTokenCount(query, line)
+    }))
+    .filter((entry) => entry.score >= 2)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, CHAT_FAQ_MATCH_LIMIT)
+    .map((entry) => entry.line);
+}
+
 async function getGithubEnrichmentCached(url: string): Promise<GithubEnrichment | null> {
   const cached = githubCache.get(url);
   if (cached && cached.expiresAt > Date.now()) {
@@ -261,7 +308,8 @@ function buildChatPrompt(args: {
   githubUrls: string[];
   githubSummaries: string[];
   defillamaUrl: string | null;
-  trainingDocs: string | null;
+  faqMatches: string[];
+  exampleMatches: string[];
   trainingExamples: string | null;
   knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string }>;
 }): { system: string; user: string } {
@@ -277,6 +325,10 @@ function buildChatPrompt(args: {
     "If the message is out of DefiLlama support scope, say that briefly and redirect politely.",
     "Treat the primary message as the main task. Do not let unrelated nearby channel chatter override it.",
     "Use recent local context only when it clearly matches the same request or reply-chain topic.",
+    "Work in layers: authoritative FAQ/docs first when they clearly apply, then GitHub metadata and similar llama precedents, then flexible case-specific reasoning for anything not covered there.",
+    "If the FAQ/docs do not clearly answer the question, do not force a canned answer. Respond flexibly to the user's actual technical situation.",
+    "If a user is sharing an implementation update, workaround, or current limitation, acknowledge that specific situation and suggest the next practical validation step.",
+    "Do not ask for a PR link or repo by default when the user has already shared enough technical context to continue the conversation usefully.",
     "If GitHub metadata is provided, use it to answer naturally and accurately.",
     "If the message contains multiple GitHub links, consider all provided GitHub metadata before replying.",
     "If GitHub metadata includes merged/open/draft status, recent participant, or assignee details, use that directly instead of giving a generic answer.",
@@ -289,12 +341,13 @@ function buildChatPrompt(args: {
     "If you are not certain which repo handles a change, say that directly and ask what exact page, data type, or repository they are referring to.",
     "When pointing a user to one of the known repositories, include the full GitHub URL in the reply.",
     `Known support facts: ${CHAT_KNOWLEDGE.join(" ")}`,
-    args.trainingDocs ? `Docs guidance: ${args.trainingDocs}` : null,
+    args.faqMatches.length > 0 ? `Authoritative FAQ/doc matches: ${args.faqMatches.join(" | ")}` : null,
+    args.exampleMatches.length > 0 ? `Relevant curated support examples: ${args.exampleMatches.join(" | ")}` : null,
     args.trainingExamples ? `Recent Discord pairs (user -> team): ${args.trainingExamples}` : null,
     args.knowledgeMatches.length > 0
       ? `Trusted llama support precedents: ${args.knowledgeMatches.map((match, index) => `${index + 1}. Question: ${match.questionText} Answer by ${match.answerAuthorName}: ${match.answerText}`).join(" ")}`
       : null,
-    "Use trusted llama precedents only as support context. Reuse them when they clearly fit, otherwise ask a clarifying question.",
+    "Use FAQ/doc matches as authoritative only when they clearly fit. Use examples and llama precedents as style/context, not rigid templates.",
     "Return JSON only with keys: classification, reply, needs_clarification, confidence.",
     "classification must be one of: support_request, repo_followup, listing_help, data_update_question, logo_update_question, out_of_scope, needs_clarification.",
     "reply must be plain text suitable for posting in a public Discord channel.",
@@ -313,6 +366,8 @@ function buildChatPrompt(args: {
     args.githubUrls.length > 0 ? `GitHub links:\n${args.githubUrls.join("\n")}` : null,
     args.githubSummaries.length > 0 ? `GitHub metadata:\n${args.githubSummaries.join("\n")}` : null,
     args.defillamaUrl ? `DefiLlama link: ${args.defillamaUrl}` : null,
+    args.faqMatches.length > 0 ? `Matched FAQ/doc facts:\n${args.faqMatches.join("\n")}` : null,
+    args.exampleMatches.length > 0 ? `Relevant curated examples:\n${args.exampleMatches.join("\n\n")}` : null,
     args.context.length > 0 ? `Recent local context:\n${args.context.join("\n")}` : null
   ].filter(Boolean).join("\n\n");
 
@@ -418,12 +473,21 @@ async function routeChatReply(
   const useRecentLocalContext = Boolean(trigger.replyChain.length > 0 || trigger.isContinuation);
   const context = await recentContext(message, useRecentLocalContext);
   const trainingDocs = loadTrainingNotes(CHAT_TRAINING_DOCS_PATH, CHAT_TRAINING_MAX_DOCS_CHARS);
+  const trainingExamplesDoc = loadTrainingNotes(CHAT_TRAINING_EXAMPLES_PATH, CHAT_TRAINING_MAX_EXAMPLES_CHARS);
   const trainingExamples = loadTrainingNotes(CHAT_TRAINING_EXPORT_PATH, CHAT_TRAINING_MAX_EXPORT_CHARS, true);
   const knowledgeMatches = findKnowledgeMatches({
     guildId: message.guildId!,
     query: combined,
     excludeMessageIds: [message.id, ...trigger.replyChain.map((entry) => entry.id)],
     limit: CHAT_KNOWLEDGE_MATCH_LIMIT
+  });
+  const faqMatches = pickRelevantFaqSnippets(trainingDocs, combined);
+  const exampleMatches = pickRelevantSections({
+    raw: trainingExamplesDoc,
+    query: combined,
+    splitter: /^## Example \d+/gm,
+    limit: CHAT_EXAMPLE_MATCH_LIMIT,
+    minScore: 2
   });
   const prompt = buildChatPrompt({
     authorId: message.author.id,
@@ -437,7 +501,8 @@ async function routeChatReply(
     githubUrls,
     githubSummaries,
     defillamaUrl,
-    trainingDocs,
+    faqMatches,
+    exampleMatches,
     trainingExamples,
     knowledgeMatches
   });

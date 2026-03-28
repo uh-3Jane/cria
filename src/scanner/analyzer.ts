@@ -1,9 +1,27 @@
 import { config } from "../config";
+import { findKnowledgeMatches } from "../knowledge/store";
 import { completeJson } from "../llm/client";
 import type { FetchedMessage, LlmIssueCandidate } from "../types";
 import { logDebug, logError } from "../utils/logger";
+import { extractDefillamaEntityUrl, extractGithubUrls, extractProjectName, preview } from "../utils/text";
 
 const MAX_PROMPT_CHARS = 16_000;
+const MAX_PRECEDENTS = 2;
+
+interface ScanCaseFeatures {
+  githubUrls: string[];
+  hasGithubPull: boolean;
+  hasDefillamaUrl: boolean;
+  mentionsCria: boolean;
+  asksQuestion: boolean;
+  unresolvedFollowUp: boolean;
+  reviewRequest: boolean;
+  waitingComplaint: boolean;
+  explicitSupportAsk: boolean;
+  projectName: string | null;
+  inferredCategory: string | null;
+  heuristicSummary: string | null;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -15,6 +33,174 @@ function chunk<T>(values: T[], size: number): T[][] {
     output.push(values.slice(index, index + size));
   }
   return output;
+}
+
+function classifyRepoCategory(urls: string[]): string | null {
+  const lower = urls.map((url) => url.toLowerCase());
+  if (lower.some((url) => url.includes("/dimension-adapters/"))) {
+    return "fees_volume";
+  }
+  if (lower.some((url) => url.includes("/defillama-adapters/"))) {
+    return "tvl";
+  }
+  if (lower.some((url) => url.includes("/yield-server/"))) {
+    return "yields";
+  }
+  if (lower.some((url) => url.includes("/defillama-app/") || url.includes("/defillama-server/"))) {
+    return "ui";
+  }
+  return null;
+}
+
+function extractScanCaseFeatures(message: FetchedMessage): ScanCaseFeatures {
+  const lower = message.content.toLowerCase();
+  const githubUrls = extractGithubUrls(message.content);
+  const unresolvedPhrases = [
+    "still waiting",
+    "still not",
+    "still broken",
+    "still missing",
+    "still incorrect",
+    "merged, but",
+    "merged but",
+    "any update",
+    "is someone looking",
+    "can someone check",
+    "can you check",
+    "waiting for",
+    "from last",
+    "review this",
+    "review these",
+    "pending review"
+  ];
+  const reviewPhrases = [
+    "review",
+    "merged",
+    "pr",
+    "pull request",
+    "look at this",
+    "looking at this",
+    "waiting for these"
+  ];
+  const supportAskPhrases = [
+    "please check",
+    "can someone",
+    "can you",
+    "help",
+    "issue",
+    "wrong",
+    "stale",
+    "broken",
+    "missing",
+    "outdated"
+  ];
+
+  const unresolvedFollowUp = unresolvedPhrases.some((phrase) => lower.includes(phrase));
+  const reviewRequest = reviewPhrases.some((phrase) => lower.includes(phrase));
+  const waitingComplaint = /(?:\b\d+\s*(?:day|days|hour|hours)\b)/i.test(message.content) || lower.includes("waiting");
+  const mentionsCria = /<@!?\d+>/.test(message.content);
+  const hasGithubPull = githubUrls.some((url) => /\/pull\/\d+/i.test(url));
+  const hasDefillamaUrl = Boolean(extractDefillamaEntityUrl(message.content));
+  const projectName = extractProjectName(message.content);
+  const explicitSupportAsk = supportAskPhrases.some((phrase) => lower.includes(phrase));
+  const asksQuestion = message.content.includes("?") || explicitSupportAsk;
+  const inferredCategory = classifyRepoCategory(githubUrls);
+
+  let heuristicSummary: string | null = null;
+  if (hasGithubPull && (unresolvedFollowUp || reviewRequest || waitingComplaint)) {
+    heuristicSummary = projectName
+      ? `${projectName} follow-up is still waiting on linked GitHub PR review or propagation`
+      : "User is following up on linked GitHub PRs that are still unresolved or waiting on review";
+  } else if (hasDefillamaUrl && (asksQuestion || explicitSupportAsk)) {
+    heuristicSummary = projectName
+      ? `${projectName} has a DefiLlama data or listing issue that needs review`
+      : "User reported a DefiLlama data or listing issue that needs review";
+  }
+
+  return {
+    githubUrls,
+    hasGithubPull,
+    hasDefillamaUrl,
+    mentionsCria,
+    asksQuestion,
+    unresolvedFollowUp,
+    reviewRequest,
+    waitingComplaint,
+    explicitSupportAsk,
+    projectName,
+    inferredCategory,
+    heuristicSummary
+  };
+}
+
+function deterministicCandidate(message: FetchedMessage, categories: string[]): LlmIssueCandidate | null {
+  const features = extractScanCaseFeatures(message);
+  if (features.hasGithubPull && (features.unresolvedFollowUp || features.reviewRequest || features.waitingComplaint)) {
+    const category = features.inferredCategory && categories.includes(features.inferredCategory)
+      ? features.inferredCategory
+      : "general";
+    return {
+      message_id: message.messageId,
+      related_message_ids: [],
+      user_id: message.authorId,
+      username: message.authorName,
+      summary: features.heuristicSummary ?? "User is asking for follow-up on unresolved GitHub PRs",
+      category,
+      urgency: features.waitingComplaint || features.unresolvedFollowUp ? "high" : "medium"
+    };
+  }
+  if (features.hasDefillamaUrl && features.asksQuestion && features.explicitSupportAsk) {
+    const category = features.inferredCategory && categories.includes(features.inferredCategory)
+      ? features.inferredCategory
+      : "general";
+    return {
+      message_id: message.messageId,
+      related_message_ids: [],
+      user_id: message.authorId,
+      username: message.authorName,
+      summary: features.heuristicSummary ?? "User reported a DefiLlama page or data issue",
+      category,
+      urgency: "medium"
+    };
+  }
+  return null;
+}
+
+function featureLines(message: FetchedMessage): string[] {
+  const features = extractScanCaseFeatures(message);
+  return [
+    `github_urls: ${features.githubUrls.length > 0 ? features.githubUrls.join(", ") : "(none)"}`,
+    `has_github_pull: ${features.hasGithubPull}`,
+    `has_defillama_url: ${features.hasDefillamaUrl}`,
+    `mentions_cria: ${features.mentionsCria}`,
+    `asks_question: ${features.asksQuestion}`,
+    `unresolved_follow_up: ${features.unresolvedFollowUp}`,
+    `review_request: ${features.reviewRequest}`,
+    `waiting_complaint: ${features.waitingComplaint}`,
+    `explicit_support_ask: ${features.explicitSupportAsk}`,
+    `project_name: ${features.projectName ?? "(none)"}`,
+    `suggested_category: ${features.inferredCategory ?? "general"}`
+  ];
+}
+
+function precedentLines(message: FetchedMessage): string {
+  const matches = findKnowledgeMatches({
+    guildId: message.guildId,
+    query: message.content,
+    excludeMessageIds: [message.messageId],
+    limit: MAX_PRECEDENTS
+  });
+  if (matches.length === 0) {
+    return "(none)";
+  }
+  return matches
+    .map((match, index) => [
+      `precedent_${index + 1}_question: ${preview(match.questionText, 220)}`,
+      `precedent_${index + 1}_answer: ${preview(match.answerText, 260)}`,
+      `precedent_${index + 1}_author: ${match.answerAuthorName}`,
+      `precedent_${index + 1}_score: ${match.score}`
+    ].join("\n"))
+    .join("\n");
 }
 
 function batchPrompt(messages: FetchedMessage[], compact = false): string {
@@ -32,6 +218,8 @@ function batchPrompt(messages: FetchedMessage[], compact = false): string {
       `channel: #${message.channelName}`,
       `timestamp: ${message.createdAt}`,
       `content: ${JSON.stringify(content)}`,
+      `signals:\n${featureLines(message).join("\n")}`,
+      `similar_llama_cases:\n${precedentLines(message)}`,
       `before:\n${before}`,
       `after:\n${after}`
     ].join("\n");
@@ -51,6 +239,7 @@ Identify messages that contain:
 - Feature requests or integration asks
 - Listing requests from project teams
 - Complaints about incorrect or stale data
+- Unresolved GitHub PR follow-ups, review waits, or "merged but still broken" escalations
 
 Do NOT flag:
 - General conversation, greetings, or banter
@@ -60,6 +249,8 @@ Do NOT flag:
 - Generic help wrappers like "i need help", "@cria help him", "please assist", "requests help", or support-email asks without a specific issue
 
 Important: If the only reply is from CriaBot, treat the user message as still needing a response.
+You will also receive extracted support signals and similar llama precedents. Use those as evidence.
+If a message has linked GitHub PRs plus unresolved follow-up language like "merged but", "still waiting", "any update", or "is someone looking at this?", prefer flagging it as an actionable repo follow-up.
 
 If the same user raises the same topic across multiple messages in this batch,
 group them into ONE entry. Use the earliest message_id as the primary,
@@ -82,9 +273,19 @@ export async function analyzeMessages(
   categories: string[],
   onBatch?: (current: number, total: number) => Promise<void> | void
 ): Promise<{ items: LlmIssueCandidate[]; skippedBatches: number }> {
-  const batches = chunk(messages, config.batchSize);
-  const all: LlmIssueCandidate[] = [];
+  const deterministic = messages
+    .map((message) => deterministicCandidate(message, categories))
+    .filter((candidate): candidate is LlmIssueCandidate => Boolean(candidate));
+  const deterministicIds = new Set(deterministic.map((candidate) => candidate.message_id));
+  const ambiguousMessages = messages.filter((message) => !deterministicIds.has(message.messageId));
+  const batches = chunk(ambiguousMessages, config.batchSize);
+  const all: LlmIssueCandidate[] = [...deterministic];
   let skippedBatches = 0;
+  logDebug("scan.preclassify.complete", {
+    totalMessages: messages.length,
+    deterministicItems: deterministic.length,
+    ambiguousMessages: ambiguousMessages.length
+  });
   for (const [index, batch] of batches.entries()) {
     await onBatch?.(index + 1, batches.length);
     let items: LlmIssueCandidate[] = [];
