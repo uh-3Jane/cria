@@ -54,10 +54,12 @@ Identify messages that contain:
 
 Do NOT flag:
 - General conversation, greetings, or banter
-- Messages that are clearly already answered inside the same local context window
+- Messages that are clearly already answered inside the same local context window by a human team member
 - Bot commands or bot output
 - Messages that are just reactions, emojis, or very short acknowledgements
 - Generic help wrappers like "i need help", "@cria help him", "please assist", "requests help", or support-email asks without a specific issue
+
+Important: If the only reply is from CriaBot, treat the user message as still needing a response.
 
 If the same user raises the same topic across multiple messages in this batch,
 group them into ONE entry. Use the earliest message_id as the primary,

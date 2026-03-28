@@ -22,7 +22,7 @@ function isSimilarTopic(left: string, right: string): boolean {
 export function groupWithinScan(candidates: LlmIssueCandidate[], messagesById: Map<string, FetchedMessage>): NormalizedCandidate[] {
   const normalized: NormalizedCandidate[] = candidates.map((candidate) => ({
     ...candidate,
-    allMessageIds: Array.from(new Set([candidate.message_id, ...candidate.related_message_ids]))
+    allMessageIds: Array.from(new Set([candidate.message_id, ...(candidate.related_message_ids ?? [])]))
   }));
 
   const consumed = new Set<number>();

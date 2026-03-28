@@ -5,7 +5,7 @@ import { enrichGithubUrl } from "../integrations/github";
 import { analyzeMessages } from "../scanner/analyzer";
 import { groupAcrossScan, groupWithinScan } from "../scanner/dedup";
 import { fetchGuildMessages } from "../scanner/fetcher";
-import { createScan, failScan, finalizeScan, getActiveCategoryNames, getChannelScanCursors, getChatEngagedMessageIds, getItem, getOpenItemsInLookback, getScanChannel, getScannedMessages, isIgnoredCandidate, listAdmins, listAllCategoryAssigneeIds, recordScannedMessages, recoverStaleScans, updateChannelScanCursors, updateItemGithubMetadata, upsertIssue, updateHumanReply } from "../issues/store";
+import { createScan, failScan, finalizeScan, getActiveCategoryNames, getChannelScanCursors, getItem, getOpenItemsInLookback, getScanChannel, getScannedMessages, getSkippableChatEngagedMessageIds, isIgnoredCandidate, listAdmins, listAllCategoryAssigneeIds, recordScannedMessages, recoverStaleScans, updateChannelScanCursors, updateItemGithubMetadata, upsertIssue, updateHumanReply } from "../issues/store";
 import { bindSummaryMessage, createDigestSession, replaceSessionCards, summaryMessagePayload } from "../issues/digest";
 import type { FetchedMessage, GithubEnrichment, NormalizedIssueInput, RenderedItem, ScanSummary } from "../types";
 import { hoursFromPeriod } from "../utils/time";
@@ -317,18 +317,27 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
     ]);
     const activeCategories = getActiveCategoryNames(interaction.guildId);
     const cachedMessages = getScannedMessages(interaction.guildId, fetched.messages.map((message) => message.messageId));
-    const chatEngagedMessageIds = getChatEngagedMessageIds(interaction.guildId, fetched.messages.map((message) => message.messageId));
+    const chatEngagedMessageIds = getSkippableChatEngagedMessageIds(
+      interaction.guildId,
+      fetched.messages.map((message) => message.messageId)
+    );
+    const chatEngagedSkippableIds = new Set(
+      fetched.messages
+        .filter((message) => chatEngagedMessageIds.has(message.messageId))
+        .filter((message) => isLowSignalHelpMessage(message.content))
+        .map((message) => message.messageId)
+    );
     const candidateMessages = fetched.messages.filter((message) => {
-      if (chatEngagedMessageIds.has(message.messageId)) {
+      if (chatEngagedSkippableIds.has(message.messageId)) {
         return false;
       }
       const cached = cachedMessages.get(message.messageId);
       return !cached || cached.content_fingerprint !== contentFingerprint(message.content);
     });
-    const messagesSkippedAsChatEngaged = fetched.messages.filter((message) => chatEngagedMessageIds.has(message.messageId));
+    const messagesSkippedAsChatEngaged = fetched.messages.filter((message) => chatEngagedSkippableIds.has(message.messageId));
     const messagesSkippedAsVague = candidateMessages.filter((message) => isLowSignalHelpMessage(message.content));
     const messagesToAnalyze = candidateMessages.filter((message) => !isLowSignalHelpMessage(message.content));
-    const messagesReused = fetched.messages.length - candidateMessages.length;
+    const messagesReused = fetched.messages.length - messagesSkippedAsChatEngaged.length - candidateMessages.length;
     logDebug("scan.fetch.complete", {
       scanId,
       guildId: interaction.guildId,

@@ -308,8 +308,11 @@ export async function handleAdmin(interaction: ChatInputCommandInteraction): Pro
   const user = interaction.options.getUser("user", true);
   if (subcommand === "add") {
     addAdmin(interaction.guildId, user.id, interaction.user.id, interaction.user.username);
+    await user.send({
+      content: `you've been made a cria admin in **${interaction.guild?.name ?? "this server"}**.\ntry \`/cria list\` to see what i can do.`
+    }).catch(() => undefined);
     await interaction.reply({
-      content: `added <@${user.id}> as admin.\ntry \`/cria list\` to see what i can do.`,
+      content: `added <@${user.id}> as admin.`,
       ephemeral: true
     });
     return;

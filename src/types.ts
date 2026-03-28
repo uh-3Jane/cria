@@ -1,5 +1,14 @@
 export type ItemStatus = "open" | "resolved" | "snoozed";
 export type Urgency = "high" | "medium" | "low";
+export type ChatClassification =
+  | "support_request"
+  | "repo_followup"
+  | "listing_help"
+  | "data_update_question"
+  | "logo_update_question"
+  | "out_of_scope"
+  | "needs_clarification";
+export type ChatConfidence = "high" | "medium" | "low";
 
 export type Category = string;
 
@@ -70,6 +79,7 @@ export interface ItemRow {
   github_last_activity_at: string | null;
   github_synced_at: string | null;
   github_owner_hint: string | null;
+  github_assignee_hint: string | null;
   author_id: string;
   author_name: string;
   content_preview: string;
@@ -101,6 +111,7 @@ export interface ItemMessageRow {
   message_url: string;
   author_id: string;
   author_name: string;
+  content_preview: string | null;
   source_message_created_at: string | null;
   created_at: string;
 }
@@ -144,6 +155,21 @@ export interface ChannelScanCursorRow {
   updated_at: string;
 }
 
+export interface ChatEngagementRow {
+  id: number;
+  guild_id: string;
+  channel_id: string;
+  user_id: string;
+  user_message_id: string;
+  bot_reply_message_id: string;
+  anchor_message_id: string | null;
+  conversation_key: string;
+  classification: ChatClassification;
+  confidence: ChatConfidence;
+  needs_clarification: number;
+  created_at: string;
+}
+
 export interface RenderedItem extends ItemRow {
   relatedCount: number;
   relatedChannels: string[];
@@ -159,6 +185,7 @@ export interface GithubEnrichment {
   status: string | null;
   lastActivityAt: string | null;
   ownerHint: string | null;
+  assigneeHint: string | null;
 }
 
 export interface NormalizedIssueInput {

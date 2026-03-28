@@ -10,7 +10,7 @@ import {
 } from "discord.js";
 import type { ItemMessageRow, RenderedItem } from "../types";
 import { logDebug, logError } from "../utils/logger";
-import { extractGithubUrl, tokenize } from "../utils/text";
+import { extractGithubUrl, isWeakFollowUpText } from "../utils/text";
 import { ageLabel } from "../utils/time";
 
 const PAGE_SIZE = 5;
@@ -117,6 +117,9 @@ function githubMetadataLines(item: RenderedItem): string[] {
   }
   if (item.github_owner_hint) {
     statusBits.push(`${item.github_owner_hint} commented`);
+  }
+  if (item.github_assignee_hint) {
+    statusBits.push(`assigned: ${item.github_assignee_hint}`);
   }
   if (item.github_last_activity_at) {
     statusBits.push(`updated ${ageLabel(item.github_last_activity_at)}`);
@@ -360,45 +363,7 @@ function preferredPreview(item: RenderedItem): string {
     return content;
   }
 
-  return isWeakFollowUp(content) ? summary : content;
-}
-
-function isWeakFollowUp(text: string): boolean {
-  const normalized = text
-    .toLowerCase()
-    .replace(/^<@!?\d+>\s*/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!normalized) {
-    return true;
-  }
-
-  const exactWeakPhrases = new Set([
-    "we back",
-    "thanks",
-    "thank you",
-    "ok",
-    "okay",
-    "got it",
-    "sounds good",
-    "nice",
-    "gm",
-    "yep",
-    "yes",
-    "no"
-  ]);
-
-  if (exactWeakPhrases.has(normalized)) {
-    return true;
-  }
-
-  const tokens = tokenize(normalized);
-  if (tokens.length <= 2) {
-    return true;
-  }
-
-  return false;
+  return isWeakFollowUpText(content) ? summary : content;
 }
 
 function truncateForCard(text: string): string {

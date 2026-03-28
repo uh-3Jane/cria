@@ -42,6 +42,19 @@ function commentAuthorLabel(login: string | null | undefined): string | null {
   return login.replace(/\[bot\]$/i, "").trim() || null;
 }
 
+function assigneeLabel(logins: Array<string | null | undefined> | null | undefined): string | null {
+  if (!logins || logins.length === 0) {
+    return null;
+  }
+  const cleaned = logins
+    .map((login) => commentAuthorLabel(login))
+    .filter((login): login is string => Boolean(login));
+  if (cleaned.length === 0) {
+    return null;
+  }
+  return cleaned.slice(0, 3).join(", ");
+}
+
 export function extractGithubReference(url: string): { owner: string; repo: string; kind: "pull" | "commit"; ref: string } | null {
   const pullMatch = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i);
   if (pullMatch) {
@@ -71,6 +84,8 @@ export async function enrichGithubUrl(url: string): Promise<GithubEnrichment | n
       merged_at?: string | null;
       updated_at?: string | null;
       user?: { login?: string | null };
+      assignee?: { login?: string | null } | null;
+      assignees?: Array<{ login?: string | null }>;
     };
     const status = payload.merged_at
       ? "merged"
@@ -78,6 +93,10 @@ export async function enrichGithubUrl(url: string): Promise<GithubEnrichment | n
         ? "draft"
         : payload.state ?? "open";
     const prAuthor = payload.user?.login ?? null;
+    const assigneeHint = assigneeLabel([
+      payload.assignee?.login ?? null,
+      ...(payload.assignees?.map((assignee) => assignee.login ?? null) ?? [])
+    ]);
     let ownerHint: string | null = null;
     const explicitCommentId = commentIdFromUrl(url);
 
@@ -127,7 +146,8 @@ export async function enrichGithubUrl(url: string): Promise<GithubEnrichment | n
       refLabel: `#${ref}`,
       status,
       lastActivityAt: payload.updated_at ?? null,
-      ownerHint
+      ownerHint,
+      assigneeHint
     };
   }
 
@@ -140,6 +160,7 @@ export async function enrichGithubUrl(url: string): Promise<GithubEnrichment | n
     refLabel: `commit ${ref.slice(0, 7)}`,
     status: "commit",
     lastActivityAt: payload.commit?.committer?.date ?? null,
-    ownerHint: null
+    ownerHint: null,
+    assigneeHint: null
   };
 }

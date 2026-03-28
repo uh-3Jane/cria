@@ -30,6 +30,7 @@ export function migrate(): void {
       github_last_activity_at DATETIME,
       github_synced_at DATETIME,
       github_owner_hint TEXT,
+      github_assignee_hint TEXT,
       author_id TEXT NOT NULL,
       author_name TEXT NOT NULL,
       content_preview TEXT NOT NULL,
@@ -61,6 +62,7 @@ export function migrate(): void {
       message_url TEXT NOT NULL,
       author_id TEXT NOT NULL,
       author_name TEXT NOT NULL,
+      content_preview TEXT,
       source_message_created_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -126,6 +128,10 @@ export function migrate(): void {
       user_message_id TEXT NOT NULL UNIQUE,
       bot_reply_message_id TEXT NOT NULL UNIQUE,
       anchor_message_id TEXT,
+      conversation_key TEXT NOT NULL,
+      classification TEXT NOT NULL DEFAULT 'needs_clarification',
+      confidence TEXT NOT NULL DEFAULT 'low',
+      needs_clarification INTEGER NOT NULL DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -239,14 +245,34 @@ export function migrate(): void {
   if (!hasColumn("items", "github_owner_hint")) {
     db.exec(`ALTER TABLE items ADD COLUMN github_owner_hint TEXT;`);
   }
+  if (!hasColumn("items", "github_assignee_hint")) {
+    db.exec(`ALTER TABLE items ADD COLUMN github_assignee_hint TEXT;`);
+  }
   if (!hasColumn("items", "last_human_reply_user_id")) {
     db.exec(`ALTER TABLE items ADD COLUMN last_human_reply_user_id TEXT;`);
   }
   if (!hasColumn("items", "last_human_reply_name")) {
     db.exec(`ALTER TABLE items ADD COLUMN last_human_reply_name TEXT;`);
   }
+  if (!hasColumn("chat_engagements", "conversation_key")) {
+    db.exec(`ALTER TABLE chat_engagements ADD COLUMN conversation_key TEXT;`);
+    db.exec(`UPDATE chat_engagements SET conversation_key = COALESCE(anchor_message_id, user_message_id) WHERE conversation_key IS NULL;`);
+  }
+  if (!hasColumn("chat_engagements", "classification")) {
+    db.exec(`ALTER TABLE chat_engagements ADD COLUMN classification TEXT NOT NULL DEFAULT 'needs_clarification';`);
+  }
+  if (!hasColumn("chat_engagements", "confidence")) {
+    db.exec(`ALTER TABLE chat_engagements ADD COLUMN confidence TEXT NOT NULL DEFAULT 'low';`);
+  }
+  if (!hasColumn("chat_engagements", "needs_clarification")) {
+    db.exec(`ALTER TABLE chat_engagements ADD COLUMN needs_clarification INTEGER NOT NULL DEFAULT 0;`);
+  }
   if (!hasColumn("item_messages", "source_message_created_at")) {
     db.exec(`ALTER TABLE item_messages ADD COLUMN source_message_created_at DATETIME;`);
+  }
+
+  if (!hasColumn("item_messages", "content_preview")) {
+    db.exec(`ALTER TABLE item_messages ADD COLUMN content_preview TEXT;`);
   }
 
   const itemMessageRows = db

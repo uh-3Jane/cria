@@ -107,12 +107,66 @@ function normalizeHelpText(text: string): string {
     .trim();
 }
 
+export function isWeakFollowUpText(text: string): boolean {
+  const normalized = text
+    .toLowerCase()
+    .replace(/^<@!?\d+>\s*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) {
+    return true;
+  }
+
+  const exactWeakPhrases = new Set([
+    "we back",
+    "thanks",
+    "thank you",
+    "ok",
+    "okay",
+    "got it",
+    "sounds good",
+    "nice",
+    "gm",
+    "yep",
+    "yes",
+    "no"
+  ]);
+
+  if (exactWeakPhrases.has(normalized)) {
+    return true;
+  }
+
+  const tokens = tokenize(normalized);
+  if (tokens.length <= 2) {
+    return true;
+  }
+
+  return false;
+}
+
 export function isLowSignalHelpMessage(text: string): boolean {
   if (extractGithubUrl(text) || extractDefillamaEntityUrl(text) || extractProjectName(text)) {
     return false;
   }
 
   const normalized = normalizeHelpText(text);
+  const faqSignals = [
+    "support email",
+    "support@",
+    "what's the support email",
+    "whats the support email",
+    "logo update",
+    "update my logo",
+    "data update",
+    "data updates",
+    "how often data updates",
+    "how often data update",
+    "hourly"
+  ];
+  if (faqSignals.some((signal) => normalized.includes(signal))) {
+    return true;
+  }
   const technicalSignals = [
     "tvl",
     "yield",
@@ -152,11 +206,7 @@ export function isLowSignalHelpMessage(text: string): boolean {
     "requests help",
     "asks to help someone else",
     "can you look at this",
-    "check this",
-    "where can i get support",
-    "how do i get support",
-    "what email should i use",
-    "what support email should i use"
+    "check this"
   ];
 
   if (vaguePhrases.some((phrase) => normalized.includes(phrase))) {

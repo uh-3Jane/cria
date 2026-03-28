@@ -1,9 +1,12 @@
 import { db } from "../db/client";
 import { writeAuditLog } from "../db/audit";
 import type {
+  ChatClassification,
+  ChatConfidence,
   Category,
   CategoryRow,
   ChannelScanCursorRow,
+  ChatEngagementRow,
   FetchedMessage,
   GithubEnrichment,
   ItemMessageRow,
@@ -15,13 +18,14 @@ import type {
   Urgency
 } from "../types";
 import { ageLabel } from "../utils/time";
-import { contentFingerprint, extractGithubPullKey, extractGithubUrl, extractProjectName, extractReference, fingerprint, sharedTokenCount, preview } from "../utils/text";
+import { contentFingerprint, extractGithubPullKey, extractGithubUrl, extractProjectName, extractReference, fingerprint, sharedTokenCount, preview, isWeakFollowUpText } from "../utils/text";
 
 const BUILTIN_CATEGORIES: Array<{ name: string; color: number }> = [
   { name: "listing", color: 0xfee75c },
   { name: "tvl", color: 0xed4245 },
+  { name: "yields", color: 0xf39c12 },
   { name: "fees_volume", color: 0xe67e22 },
-  { name: "incentives", color: 0x9b59b6 },
+  { name: "emissions", color: 0x9b59b6 },
   { name: "ui", color: 0x3498db },
   { name: "partnerships", color: 0xf1c40f },
   { name: "ai", color: 0x5865f2 },
@@ -127,6 +131,7 @@ function rowToItem(row: Record<string, unknown>): ItemRow {
     github_last_activity_at: optionalString("github_last_activity_at"),
     github_synced_at: optionalString("github_synced_at"),
     github_owner_hint: optionalString("github_owner_hint"),
+    github_assignee_hint: optionalString("github_assignee_hint"),
     author_id: requiredString("author_id"),
     author_name: requiredString("author_name"),
     content_preview: requiredString("content_preview"),
@@ -410,27 +415,48 @@ export function recordChatEngagement(args: {
   userMessageId: string;
   botReplyMessageId: string;
   anchorMessageId?: string | null;
+  conversationKey: string;
+  classification: ChatClassification;
+  confidence: ChatConfidence;
+  needsClarification: boolean;
 }): void {
   db.query(
-    `INSERT OR REPLACE INTO chat_engagements (
+    `INSERT INTO chat_engagements (
         guild_id,
         channel_id,
         user_id,
         user_message_id,
         bot_reply_message_id,
-        anchor_message_id
-      ) VALUES (?, ?, ?, ?, ?, ?)`
+        anchor_message_id,
+        conversation_key,
+        classification,
+        confidence,
+        needs_clarification
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_message_id) DO UPDATE SET
+        channel_id = excluded.channel_id,
+        user_id = excluded.user_id,
+        bot_reply_message_id = excluded.bot_reply_message_id,
+        anchor_message_id = excluded.anchor_message_id,
+        conversation_key = excluded.conversation_key,
+        classification = excluded.classification,
+        confidence = excluded.confidence,
+        needs_clarification = excluded.needs_clarification`
   ).run(
     args.guildId,
     args.channelId,
     args.userId,
     args.userMessageId,
     args.botReplyMessageId,
-    args.anchorMessageId ?? null
+    args.anchorMessageId ?? null,
+    args.conversationKey,
+    args.classification,
+    args.confidence,
+    args.needsClarification ? 1 : 0
   );
 }
 
-export function getChatEngagedMessageIds(guildId: string, messageIds: string[]): Set<string> {
+export function getSkippableChatEngagedMessageIds(guildId: string, messageIds: string[]): Set<string> {
   if (messageIds.length === 0) {
     return new Set();
   }
@@ -439,6 +465,9 @@ export function getChatEngagedMessageIds(guildId: string, messageIds: string[]):
     `SELECT user_message_id, bot_reply_message_id, anchor_message_id
        FROM chat_engagements
       WHERE guild_id = ?
+        AND needs_clarification = 0
+        AND confidence IN ('high', 'medium')
+        AND classification IN ('out_of_scope')
         AND (
           user_message_id IN (${placeholders})
           OR bot_reply_message_id IN (${placeholders})
@@ -459,6 +488,40 @@ export function getChatEngagedMessageIds(guildId: string, messageIds: string[]):
     }
   }
   return engaged;
+}
+
+export function findChatConversation(guildId: string, messageIds: string[]): { conversationKey: string | null; botReplyCount: number } {
+  if (messageIds.length === 0) {
+    return { conversationKey: null, botReplyCount: 0 };
+  }
+  const placeholders = messageIds.map(() => "?").join(", ");
+  const row = db.query(
+    `SELECT conversation_key
+       FROM chat_engagements
+      WHERE guild_id = ?
+        AND (
+          user_message_id IN (${placeholders})
+          OR bot_reply_message_id IN (${placeholders})
+          OR anchor_message_id IN (${placeholders})
+        )
+      ORDER BY created_at DESC
+      LIMIT 1`
+  ).get(guildId, ...messageIds, ...messageIds, ...messageIds) as { conversation_key: string | null } | null;
+
+  if (!row?.conversation_key) {
+    return { conversationKey: null, botReplyCount: 0 };
+  }
+
+  const count = db.query(
+    `SELECT COUNT(*) AS count
+       FROM chat_engagements
+      WHERE guild_id = ? AND conversation_key = ?`
+  ).get(guildId, row.conversation_key) as { count: number };
+
+  return {
+    conversationKey: row.conversation_key,
+    botReplyCount: Number(count.count)
+  };
 }
 
 export function createScan(guildId: string, triggeredBy: string, lookbackHours: number): number {
@@ -646,8 +709,8 @@ function findDuplicateItem(input: NormalizedIssueInput): ItemRow | null {
 function attachMessages(itemId: number, messages: FetchedMessage[]): void {
   const stmt = db.query(
     `INSERT OR IGNORE INTO item_messages
-       (item_id, guild_id, channel_id, message_id, message_url, author_id, author_name, source_message_created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+       (item_id, guild_id, channel_id, message_id, message_url, author_id, author_name, content_preview, source_message_created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   for (const message of messages) {
     stmt.run(
@@ -658,6 +721,7 @@ function attachMessages(itemId: number, messages: FetchedMessage[]): void {
       message.messageUrl,
       message.authorId,
       message.authorName,
+      preview(message.content),
       message.createdAt
     );
   }
@@ -765,6 +829,7 @@ export function updateItemGithubMetadata(itemId: number, guildId: string, enrich
             github_last_activity_at = ?,
             github_synced_at = CURRENT_TIMESTAMP,
             github_owner_hint = ?,
+            github_assignee_hint = ?,
             updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND guild_id = ?`
   ).run(
@@ -774,6 +839,7 @@ export function updateItemGithubMetadata(itemId: number, guildId: string, enrich
     enrichment.status,
     enrichment.lastActivityAt,
     enrichment.ownerHint,
+    enrichment.assigneeHint,
     itemId,
     guildId
   );
@@ -784,12 +850,12 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
   const categoryColors = new Map(
     listCategories(guildId).map((category) => [category.name, category.color] as const)
   );
-  const relatedByItemId = new Map<number, Array<{ channel_id: string; source_message_created_at: string | null; created_at: string }>>();
+  const relatedByItemId = new Map<number, Array<{ channel_id: string; source_message_created_at: string | null; created_at: string; content_preview: string | null }>>();
 
   if (itemIds.length > 0) {
     const placeholders = itemIds.map(() => "?").join(", ");
     const relatedRows = db.query(
-      `SELECT item_id, channel_id, source_message_created_at, created_at
+      `SELECT item_id, channel_id, source_message_created_at, created_at, content_preview
          FROM item_messages
         WHERE item_id IN (${placeholders})
         ORDER BY item_id ASC, COALESCE(source_message_created_at, created_at) ASC`
@@ -798,6 +864,7 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
       channel_id: string;
       source_message_created_at: string | null;
       created_at: string;
+      content_preview: string | null;
     }>;
 
     for (const row of relatedRows) {
@@ -814,12 +881,21 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
     const item = rowToItem(raw);
     const related = relatedByItemId.get(item.id) ?? [];
     const firstReportedAt = related[0]?.source_message_created_at ?? related[0]?.created_at ?? item.source_message_created_at ?? item.created_at;
+    const relatedPreviews = related
+      .map((row) => row.content_preview)
+      .filter((value): value is string => Boolean(value));
+    const candidatePreviews = relatedPreviews.length > 0 ? relatedPreviews : [item.content_preview];
+    let bestPreview = candidatePreviews.find((text) => !isWeakFollowUpText(text)) ?? candidatePreviews[0] ?? item.content_preview;
+    if (bestPreview) {
+      bestPreview = bestPreview.replace(/\s+/g, " ").trim();
+    }
     const projectNameSource = item.github_url || extractGithubUrl(item.content_preview)
-      ? item.content_preview
-      : `${item.summary} ${item.content_preview}`;
+      ? (bestPreview ?? item.content_preview)
+      : `${item.summary} ${bestPreview ?? item.content_preview}`;
     const projectName = extractProjectName(projectNameSource);
     return {
       ...item,
+      content_preview: bestPreview ?? item.content_preview,
       relatedCount: Math.max(0, related.length - 1),
       relatedChannels: Array.from(new Set(related.map((row) => row.channel_id))),
       ageLabel: ageLabel(firstReportedAt),
