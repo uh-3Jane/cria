@@ -1,12 +1,16 @@
 import { config } from "../config";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { findKnowledgeMatches } from "../knowledge/store";
 import { completeJson } from "../llm/client";
 import type { FetchedMessage, LlmIssueCandidate } from "../types";
 import { logDebug, logError } from "../utils/logger";
-import { extractDefillamaEntityUrl, extractGithubUrls, extractProjectName, preview } from "../utils/text";
+import { extractDefillamaEntityUrl, extractGithubUrls, extractProjectName, preview, sharedTokenCount } from "../utils/text";
 
 const MAX_PROMPT_CHARS = 16_000;
 const MAX_PRECEDENTS = 2;
+const TRAINING_DOCS_PATH = resolve(process.cwd(), "docs/chat_training_docs.md");
+let faqDocCache: string | null | undefined;
 
 interface ScanCaseFeatures {
   githubUrls: string[];
@@ -21,6 +25,37 @@ interface ScanCaseFeatures {
   projectName: string | null;
   inferredCategory: string | null;
   heuristicSummary: string | null;
+}
+
+function trainingDocs(): string | null {
+  if (faqDocCache !== undefined) {
+    return faqDocCache;
+  }
+  try {
+    faqDocCache = readFileSync(TRAINING_DOCS_PATH, "utf8");
+  } catch {
+    faqDocCache = null;
+  }
+  return faqDocCache;
+}
+
+function faqMatchesForQuery(query: string): string[] {
+  const raw = trainingDocs();
+  if (!raw) {
+    return [];
+  }
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .map((line) => ({
+      line: line.slice(2).trim(),
+      score: sharedTokenCount(query, line)
+    }))
+    .filter((entry) => entry.score >= 2)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 2)
+    .map((entry) => entry.line);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -135,6 +170,13 @@ function extractScanCaseFeatures(message: FetchedMessage): ScanCaseFeatures {
 
 function deterministicCandidate(message: FetchedMessage, categories: string[]): LlmIssueCandidate | null {
   const features = extractScanCaseFeatures(message);
+  const faqMatches = faqMatchesForQuery(message.content);
+  const knowledgeMatches = findKnowledgeMatches({
+    guildId: message.guildId,
+    query: message.content,
+    excludeMessageIds: [message.messageId],
+    limit: MAX_PRECEDENTS
+  });
   if (features.hasGithubPull && (features.unresolvedFollowUp || features.reviewRequest || features.waitingComplaint)) {
     const category = features.inferredCategory && categories.includes(features.inferredCategory)
       ? features.inferredCategory
@@ -160,6 +202,19 @@ function deterministicCandidate(message: FetchedMessage, categories: string[]): 
       username: message.authorName,
       summary: features.heuristicSummary ?? "User reported a DefiLlama page or data issue",
       category,
+      urgency: "medium"
+    };
+  }
+  if (features.mentionsCria && features.asksQuestion && faqMatches.length === 0 && knowledgeMatches.length === 0) {
+    return {
+      message_id: message.messageId,
+      related_message_ids: [],
+      user_id: message.authorId,
+      username: message.authorName,
+      summary: features.projectName
+        ? `${features.projectName} needs a llama follow-up because the request is not covered by known docs`
+        : "User asked a new question that needs llama follow-up",
+      category: "general",
       urgency: "medium"
     };
   }

@@ -74,6 +74,13 @@ interface ChatTriggerContext {
   isContinuation: boolean;
 }
 
+interface ChatGrounding {
+  faqMatches: string[];
+  exampleMatches: string[];
+  knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string; score: number }>;
+  githubSummaries: string[];
+}
+
 function stripBotMention(text: string, botUserId: string): string {
   return text.replace(new RegExp(`<@!?${botUserId}>`, "g"), " ").replace(/\s+/g, " ").trim();
 }
@@ -255,6 +262,21 @@ function pickRelevantFaqSnippets(raw: string | null, query: string): string[] {
     .sort((left, right) => right.score - left.score)
     .slice(0, CHAT_FAQ_MATCH_LIMIT)
     .map((entry) => entry.line);
+}
+
+function isEscalationQuestion(args: {
+  message: Message;
+  invocation: string;
+  anchor: string;
+  grounding: ChatGrounding;
+  defillamaUrl: string | null;
+}): boolean {
+  const combined = `${args.anchor}\n${args.invocation}\n${args.message.content}`.toLowerCase();
+  const asksQuestion = combined.includes("?") || /\b(api|endpoint|support|issue|wrong|broken|missing|how|where|why|can|does|is there)\b/i.test(combined);
+  const hasGrounding = args.grounding.faqMatches.length > 0
+    || args.grounding.githubSummaries.length > 0
+    || args.grounding.knowledgeMatches.some((match) => match.score >= 6);
+  return asksQuestion && !hasGrounding && (args.message.mentions.users.size > 0 || Boolean(args.defillamaUrl) || combined.length >= 40);
 }
 
 async function getGithubEnrichmentCached(url: string): Promise<GithubEnrichment | null> {
@@ -489,6 +511,26 @@ async function routeChatReply(
     limit: CHAT_EXAMPLE_MATCH_LIMIT,
     minScore: 2
   });
+  const grounding: ChatGrounding = {
+    faqMatches,
+    exampleMatches,
+    knowledgeMatches,
+    githubSummaries
+  };
+  if (isEscalationQuestion({
+    message,
+    invocation,
+    anchor,
+    grounding,
+    defillamaUrl
+  })) {
+    return {
+      reply: "i'm not fully sure on that one yet, so let me get a llama for you. if you have any extra context or links, please drop them here and the team can pick it up faster.",
+      classification: "needs_clarification",
+      confidence: "low",
+      anchorMessageId: immediateReply && immediateReply.author.id !== botUserId ? immediateReply.id : null
+    };
+  }
   const prompt = buildChatPrompt({
     authorId: message.author.id,
     authorName: message.author.username,
