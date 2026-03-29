@@ -68,6 +68,21 @@ Never commit `.env`. This repo ignores it by default.
 - `docker-compose.yml` includes `restart: unless-stopped`
 - Chatbot behavior is configurable and off by default until enabled in Discord
 
+## Server Deployment
+
+For moving `cria` onto the DefiLlama main server:
+
+- migration checklist: [defillama_server_migration.md](/Users/uheux/Documents/Playground/cria/docs/defillama_server_migration.md)
+- ops runbook: [ops_runbook.md](/Users/uheux/Documents/Playground/cria/docs/ops_runbook.md)
+
+Helper scripts:
+
+```bash
+./scripts/deploy_compose.sh
+./scripts/backup_db.sh
+./scripts/restore_db.sh /absolute/path/to/backup.db
+```
+
 ## Verification
 
 Typecheck:

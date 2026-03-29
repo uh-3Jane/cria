@@ -3,3 +3,5 @@ dist
 data
 .DS_Store
 .env
+data.sqlite
+backups
