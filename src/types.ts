@@ -244,6 +244,7 @@ export interface KnowledgeDocumentRow {
   source: "live" | "backfill";
   feedback_kind: "unreviewed" | "confirmed" | "refined" | "corrected";
   feedback_score: number;
+  resolution_count: number;
   related_bot_reply_message_id: string | null;
   related_bot_classification: ChatClassification | null;
   related_bot_confidence: ChatConfidence | null;
@@ -259,4 +260,5 @@ export interface KnowledgeMatch {
   answerAuthorName: string;
   score: number;
   feedbackKind: "unreviewed" | "confirmed" | "refined" | "corrected";
+  resolutionCount: number;
 }

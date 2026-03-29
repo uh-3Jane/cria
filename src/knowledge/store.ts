@@ -62,6 +62,7 @@ function rowToKnowledgeDocument(row: Record<string, unknown>): KnowledgeDocument
     source: requiredString("source") as KnowledgeDocumentRow["source"],
     feedback_kind: requiredString("feedback_kind") as KnowledgeDocumentRow["feedback_kind"],
     feedback_score: requiredNumber("feedback_score"),
+    resolution_count: requiredNumber("resolution_count"),
     related_bot_reply_message_id: optionalString("related_bot_reply_message_id"),
     related_bot_classification: optionalString("related_bot_classification") as KnowledgeDocumentRow["related_bot_classification"],
     related_bot_confidence: optionalString("related_bot_confidence") as KnowledgeDocumentRow["related_bot_confidence"],
@@ -117,6 +118,13 @@ function feedbackWeight(row: KnowledgeDocumentRow): number {
   return 0;
 }
 
+function resolutionBonus(row: KnowledgeDocumentRow): number {
+  if (row.feedback_kind === "corrected") {
+    return 0;
+  }
+  return Math.min(row.resolution_count * 4, 12);
+}
+
 export function upsertKnowledgeDocument(input: CreateKnowledgeDocumentInput): number {
   const normalizedQuestion = preview(input.questionText, 1_000);
   const normalizedContext = input.contextText ? preview(input.contextText, 1_500) : null;
@@ -147,10 +155,11 @@ export function upsertKnowledgeDocument(input: CreateKnowledgeDocumentInput): nu
       source,
       feedback_kind,
       feedback_score,
+      resolution_count,
       related_bot_reply_message_id,
       related_bot_classification,
       related_bot_confidence
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(guild_id, answer_message_id) DO UPDATE SET
       channel_id = excluded.channel_id,
       conversation_key = excluded.conversation_key,
@@ -167,6 +176,7 @@ export function upsertKnowledgeDocument(input: CreateKnowledgeDocumentInput): nu
       source = excluded.source,
       feedback_kind = excluded.feedback_kind,
       feedback_score = excluded.feedback_score,
+      resolution_count = excluded.resolution_count,
       related_bot_reply_message_id = excluded.related_bot_reply_message_id,
       related_bot_classification = excluded.related_bot_classification,
       related_bot_confidence = excluded.related_bot_confidence,
@@ -189,6 +199,7 @@ export function upsertKnowledgeDocument(input: CreateKnowledgeDocumentInput): nu
     input.source,
     input.feedbackKind ?? "unreviewed",
     input.feedbackScore ?? 0,
+    0,
     input.relatedBotReplyMessageId ?? null,
     input.relatedBotClassification ?? null,
     input.relatedBotConfidence ?? null
@@ -236,6 +247,7 @@ export function findKnowledgeMatches(args: {
       }
       score += feedbackWeight(row);
       score += recurrenceBonus(row, docs);
+      score += resolutionBonus(row);
       if (githubUrl && row.combined_text.includes(githubUrl)) {
         score += 8;
       }
@@ -254,8 +266,68 @@ export function findKnowledgeMatches(args: {
       answerText: row.answer_text,
       answerAuthorName: row.answer_author_name,
       score,
-      feedbackKind: row.feedback_kind
+      feedbackKind: row.feedback_kind,
+      resolutionCount: row.resolution_count
     }));
 
   return matches;
+}
+
+export function reinforceKnowledgeFromResolvedMessages(guildId: string, messageIds: string[]): number {
+  if (messageIds.length === 0) {
+    return 0;
+  }
+
+  const placeholders = messageIds.map(() => "?").join(", ");
+  const before = db.query(
+    `SELECT COUNT(*) AS count
+       FROM knowledge_documents
+      WHERE guild_id = ?
+        AND question_message_id IN (${placeholders})`
+  ).get(guildId, ...messageIds) as { count: number };
+
+  db.query(
+    `UPDATE knowledge_documents
+        SET feedback_kind = CASE
+              WHEN feedback_kind = 'unreviewed' THEN 'confirmed'
+              ELSE feedback_kind
+            END,
+            feedback_score = CASE
+              WHEN feedback_kind = 'unreviewed' AND feedback_score < 4 THEN 4
+              ELSE feedback_score
+            END,
+            resolution_count = resolution_count + 1,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE guild_id = ?
+        AND question_message_id IN (${placeholders})`
+  ).run(guildId, ...messageIds);
+
+  return Number(before.count);
+}
+
+export function relaxKnowledgeFromReopenedMessages(guildId: string, messageIds: string[]): number {
+  if (messageIds.length === 0) {
+    return 0;
+  }
+
+  const placeholders = messageIds.map(() => "?").join(", ");
+  const before = db.query(
+    `SELECT COUNT(*) AS count
+       FROM knowledge_documents
+      WHERE guild_id = ?
+        AND question_message_id IN (${placeholders})`
+  ).get(guildId, ...messageIds) as { count: number };
+
+  db.query(
+    `UPDATE knowledge_documents
+        SET resolution_count = CASE
+              WHEN resolution_count > 0 THEN resolution_count - 1
+              ELSE 0
+            END,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE guild_id = ?
+        AND question_message_id IN (${placeholders})`
+  ).run(guildId, ...messageIds);
+
+  return Number(before.count);
 }

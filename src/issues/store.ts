@@ -1,5 +1,6 @@
 import { db } from "../db/client";
 import { writeAuditLog } from "../db/audit";
+import { reinforceKnowledgeFromResolvedMessages, relaxKnowledgeFromReopenedMessages } from "../knowledge/store";
 import type {
   ChatClassification,
   ChatConfidence,
@@ -1051,6 +1052,12 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
             updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND guild_id = ?`
   ).run(actorName, itemId, guildId);
+  const relatedMessageIds = (db.query(
+    `SELECT message_id
+       FROM item_messages
+      WHERE item_id = ?`
+  ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
+  reinforceKnowledgeFromResolvedMessages(guildId, relatedMessageIds);
   writeAuditLog({ guildId, actorId, actorName, action: "resolve", target: String(itemId) });
 }
 
@@ -1063,6 +1070,12 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
             updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND guild_id = ?`
   ).run(itemId, guildId);
+  const relatedMessageIds = (db.query(
+    `SELECT message_id
+       FROM item_messages
+      WHERE item_id = ?`
+  ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
+  relaxKnowledgeFromReopenedMessages(guildId, relatedMessageIds);
   writeAuditLog({ guildId, actorId, actorName, action: "reopen", target: String(itemId) });
 }
 

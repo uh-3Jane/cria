@@ -213,6 +213,7 @@ export function migrate(): void {
       source TEXT NOT NULL DEFAULT 'live',
       feedback_kind TEXT NOT NULL DEFAULT 'unreviewed',
       feedback_score INTEGER NOT NULL DEFAULT 0,
+      resolution_count INTEGER NOT NULL DEFAULT 0,
       related_bot_reply_message_id TEXT,
       related_bot_classification TEXT,
       related_bot_confidence TEXT,
@@ -301,6 +302,9 @@ export function migrate(): void {
   }
   if (!hasColumn("knowledge_documents", "feedback_score")) {
     db.exec(`ALTER TABLE knowledge_documents ADD COLUMN feedback_score INTEGER NOT NULL DEFAULT 0;`);
+  }
+  if (!hasColumn("knowledge_documents", "resolution_count")) {
+    db.exec(`ALTER TABLE knowledge_documents ADD COLUMN resolution_count INTEGER NOT NULL DEFAULT 0;`);
   }
   if (!hasColumn("knowledge_documents", "related_bot_reply_message_id")) {
     db.exec(`ALTER TABLE knowledge_documents ADD COLUMN related_bot_reply_message_id TEXT;`);
