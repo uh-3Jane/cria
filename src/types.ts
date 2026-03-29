@@ -9,6 +9,8 @@ export type ChatClassification =
   | "out_of_scope"
   | "needs_clarification";
 export type ChatConfidence = "high" | "medium" | "low";
+export type LearningFeedbackDomain = "chat_answer" | "scan_category" | "scan_resolution" | "scan_assignment";
+export type LearningFeedbackKind = "confirmed" | "refined" | "corrected";
 
 export type Category = string;
 
@@ -261,4 +263,36 @@ export interface KnowledgeMatch {
   score: number;
   feedbackKind: "unreviewed" | "confirmed" | "refined" | "corrected";
   resolutionCount: number;
+}
+
+export interface LearningFeedbackRow {
+  id: number;
+  guild_id: string;
+  domain: LearningFeedbackDomain;
+  input_text: string;
+  context_text: string | null;
+  initial_output: string | null;
+  corrected_output: string;
+  feedback_kind: LearningFeedbackKind;
+  weight: number;
+  reinforcement_count: number;
+  item_id: number | null;
+  source_message_id: string | null;
+  related_message_id: string | null;
+  feedback_fingerprint: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LearningFeedbackMatch {
+  id: number;
+  domain: LearningFeedbackDomain;
+  inputText: string;
+  contextText: string | null;
+  initialOutput: string | null;
+  correctedOutput: string;
+  feedbackKind: LearningFeedbackKind;
+  weight: number;
+  reinforcementCount: number;
+  score: number;
 }

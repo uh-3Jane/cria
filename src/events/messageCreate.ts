@@ -3,11 +3,12 @@ import { resolve } from "node:path";
 import { ChannelType, type Client, type GuildMember, type Message } from "discord.js";
 import { findChatConversation, findChatEngagementByBotReply, isChatEnabled, listChatChannels, recordChatEngagement } from "../issues/store";
 import { findKnowledgeMatches, upsertKnowledgeDocument } from "../knowledge/store";
+import { findLearningFeedbackMatches, recordLearningFeedback } from "../learning/store";
 import { completeJson } from "../llm/client";
 import { enrichGithubUrl } from "../integrations/github";
 import { logDebug, logError } from "../utils/logger";
 import { extractDefillamaEntityUrl, extractGithubUrls, isLowSignalKnowledgeReply, isWeakFollowUpText, preview, sharedTokenCount } from "../utils/text";
-import type { ChatClassification, ChatConfidence, GithubEnrichment } from "../types";
+import type { ChatClassification, ChatConfidence, GithubEnrichment, LearningFeedbackKind as SharedLearningFeedbackKind } from "../types";
 
 const SUPPORT_EMAIL = "support@defillama.com";
 const REPO_LINKS = {
@@ -81,6 +82,7 @@ interface ChatGrounding {
   faqMatches: string[];
   exampleMatches: string[];
   knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string; score: number; feedbackKind: "unreviewed" | "confirmed" | "refined" | "corrected" }>;
+  learningMatches: Array<{ domain: string; correctedOutput: string; feedbackKind: SharedLearningFeedbackKind; score: number }>;
   githubSummaries: string[];
 }
 
@@ -294,7 +296,13 @@ function isEscalationQuestion(args: {
     (match.feedbackKind === "confirmed" || match.feedbackKind === "refined")
     && match.score >= CHAT_LEARNED_PRECEDENT_MIN_SCORE
   );
-  const hasLearnedGoAhead = learnedMatches.length >= CHAT_LEARNED_PRECEDENT_MIN_COUNT;
+  const sharedMatches = args.grounding.learningMatches.filter((match) =>
+    (match.domain === "chat_answer" || match.domain === "scan_resolution")
+    && (match.feedbackKind === "confirmed" || match.feedbackKind === "refined")
+    && match.score >= CHAT_LEARNED_PRECEDENT_MIN_SCORE
+  );
+  const hasLearnedGoAhead = learnedMatches.length >= CHAT_LEARNED_PRECEDENT_MIN_COUNT
+    || sharedMatches.length >= CHAT_LEARNED_PRECEDENT_MIN_COUNT;
   return asksQuestion && !hasLearnedGoAhead && (args.message.mentions.users.size > 0 || Boolean(args.defillamaUrl) || combined.length >= 20);
 }
 
@@ -353,6 +361,7 @@ function buildChatPrompt(args: {
   exampleMatches: string[];
   trainingExamples: string | null;
   knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string; feedbackKind: LlamaFeedbackKind }>;
+  learningMatches: Array<{ domain: string; correctedOutput: string; feedbackKind: SharedLearningFeedbackKind }>;
 }): { system: string; user: string } {
     const system = [
     "You are Cria, a public-facing DefiLlama Discord helper.",
@@ -387,6 +396,9 @@ function buildChatPrompt(args: {
     args.trainingExamples ? `Recent Discord pairs (user -> team): ${args.trainingExamples}` : null,
     args.knowledgeMatches.length > 0
       ? `Trusted llama support precedents: ${args.knowledgeMatches.map((match, index) => `${index + 1}. Question: ${match.questionText} ${match.feedbackKind === "unreviewed" ? "" : `Judgment: ${match.feedbackKind}. `}Answer by ${match.answerAuthorName}: ${match.answerText}`).join(" ")}`
+      : null,
+    args.learningMatches.length > 0
+      ? `Shared learned outcomes from chat and scan: ${args.learningMatches.map((match, index) => `${index + 1}. Domain: ${match.domain}. Judgment: ${match.feedbackKind}. Learned outcome: ${match.correctedOutput}`).join(" ")}`
       : null,
     "Use FAQ/doc matches as authoritative only when they clearly fit. Use examples and llama precedents as style/context, not rigid templates.",
     "Return JSON only with keys: classification, reply, needs_clarification, confidence.",
@@ -584,6 +596,20 @@ async function recordLlamaKnowledge(message: Message): Promise<void> {
     feedbackScore: feedback.score,
     relatedBotReplyMessageId: botReply?.id ?? null
   });
+  if (feedback.kind !== "unreviewed") {
+    recordLearningFeedback({
+      guildId: message.guildId,
+      domain: "chat_answer",
+      inputText: question.content,
+      contextText,
+      initialOutput: botReply?.content ?? null,
+      correctedOutput: message.content,
+      feedbackKind: feedback.kind,
+      weight: feedback.score,
+      sourceMessageId: question.id,
+      relatedMessageId: message.id
+    });
+  }
 }
 
 async function routeChatReply(
@@ -620,6 +646,11 @@ async function routeChatReply(
   const learnedKnowledgeMatches = knowledgeMatches.filter((match) =>
     match.feedbackKind === "confirmed" || match.feedbackKind === "refined"
   );
+  const learningMatches = findLearningFeedbackMatches({
+    guildId: message.guildId!,
+    query: combined,
+    limit: CHAT_KNOWLEDGE_MATCH_LIMIT
+  });
   const faqMatches = pickRelevantFaqSnippets(trainingDocs, combined);
   const exampleMatches = pickRelevantSections({
     raw: trainingExamplesDoc,
@@ -632,6 +663,7 @@ async function routeChatReply(
     faqMatches,
     exampleMatches,
     knowledgeMatches: learnedKnowledgeMatches,
+    learningMatches,
     githubSummaries
   };
   if (isEscalationQuestion({
@@ -663,7 +695,8 @@ async function routeChatReply(
     faqMatches,
     exampleMatches,
     trainingExamples,
-    knowledgeMatches: learnedKnowledgeMatches
+    knowledgeMatches: learnedKnowledgeMatches,
+    learningMatches
   });
 
   const decision = parseChatDecision(await completeJson(prompt.system, prompt.user));

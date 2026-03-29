@@ -2,6 +2,7 @@ import { config } from "../config";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { findKnowledgeMatches } from "../knowledge/store";
+import { findLearningFeedbackMatches } from "../learning/store";
 import { completeJson } from "../llm/client";
 import type { FetchedMessage, LlmIssueCandidate } from "../types";
 import { logDebug, logError } from "../utils/logger";
@@ -258,6 +259,28 @@ function precedentLines(message: FetchedMessage): string {
     .join("\n");
 }
 
+function learningLines(message: FetchedMessage): string {
+  const matches = findLearningFeedbackMatches({
+    guildId: message.guildId,
+    query: message.content,
+    domains: ["scan_category", "scan_resolution", "scan_assignment"],
+    limit: MAX_PRECEDENTS
+  });
+  if (matches.length === 0) {
+    return "(none)";
+  }
+  return matches
+    .map((match, index) => [
+      `learning_${index + 1}_domain: ${match.domain}`,
+      `learning_${index + 1}_input: ${preview(match.inputText, 220)}`,
+      `learning_${index + 1}_from: ${match.initialOutput ?? "(none)"}`,
+      `learning_${index + 1}_to: ${preview(match.correctedOutput, 220)}`,
+      `learning_${index + 1}_kind: ${match.feedbackKind}`,
+      `learning_${index + 1}_score: ${match.score}`
+    ].join("\n"))
+    .join("\n");
+}
+
 function batchPrompt(messages: FetchedMessage[], compact = false): string {
   const blocks = messages.map((message, index) => {
     const beforeLines = compact ? message.contextBefore.slice(-1) : message.contextBefore;
@@ -275,6 +298,7 @@ function batchPrompt(messages: FetchedMessage[], compact = false): string {
       `content: ${JSON.stringify(content)}`,
       `signals:\n${featureLines(message).join("\n")}`,
       `similar_llama_cases:\n${precedentLines(message)}`,
+      `similar_learning_feedback:\n${learningLines(message)}`,
       `before:\n${before}`,
       `after:\n${after}`
     ].join("\n");
@@ -304,8 +328,11 @@ Do NOT flag:
 - Generic help wrappers like "i need help", "@cria help him", "please assist", "requests help", or support-email asks without a specific issue
 
 Important: If the only reply is from CriaBot, treat the user message as still needing a response.
-You will also receive extracted support signals and similar llama precedents. Use those as evidence.
+You will also receive extracted support signals, similar llama precedents, and similar corrected learning feedback from scan/chat outcomes. Use those as evidence.
 If a message has linked GitHub PRs plus unresolved follow-up language like "merged but", "still waiting", "any update", or "is someone looking at this?", prefer flagging it as an actionable repo follow-up.
+
+If similar learning feedback shows that humans repeatedly re-categorized a similar prompt, prefer the corrected category over a weak guess.
+If similar learning feedback shows that similar prompts were resolved or assigned without needing escalation, use that as a relevance signal, but do not fabricate details that are not in the message.
 
 If the same user raises the same topic across multiple messages in this batch,
 group them into ONE entry. Use the earliest message_id as the primary,

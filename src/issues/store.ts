@@ -1,6 +1,7 @@
 import { db } from "../db/client";
 import { writeAuditLog } from "../db/audit";
 import { reinforceKnowledgeFromResolvedMessages, relaxKnowledgeFromReopenedMessages } from "../knowledge/store";
+import { recordLearningFeedback } from "../learning/store";
 import type {
   ChatClassification,
   ChatConfidence,
@@ -18,6 +19,7 @@ import type {
   ScanSummary,
   Urgency
 } from "../types";
+import { logError } from "../utils/logger";
 import { ageLabel } from "../utils/time";
 import { contentFingerprint, extractGithubPullKey, extractGithubUrl, extractProjectName, fingerprint, likelySameTopic, preview, isWeakFollowUpText } from "../utils/text";
 
@@ -979,13 +981,67 @@ export function getItemMessages(itemId: number): ItemMessageRow[] {
   return db.query(`SELECT * FROM item_messages WHERE item_id = ? ORDER BY created_at ASC`).all(itemId) as ItemMessageRow[];
 }
 
+function buildItemLearningPayload(itemId: number, guildId: string): {
+  item: ItemRow;
+  inputText: string;
+  contextText: string;
+  relatedMessageIds: string[];
+} | null {
+  const item = getItem(itemId, guildId);
+  if (!item) {
+    return null;
+  }
+  const relatedMessages = getItemMessages(itemId);
+  const inputParts = relatedMessages
+    .map((message) => message.content_preview?.trim())
+    .filter((value): value is string => Boolean(value));
+  if (inputParts.length === 0 && item.content_preview.trim()) {
+    inputParts.push(item.content_preview.trim());
+  }
+  const inputText = preview(inputParts.join("\n"), 1_000);
+  const contextText = preview(
+    [
+      `summary: ${item.summary}`,
+      `category: ${item.category}`,
+      `urgency: ${item.urgency}`,
+      `author: ${item.author_name}`
+    ].join("\n"),
+    1_500
+  );
+  const relatedMessageIds = relatedMessages.map((message) => message.message_id);
+  if (!inputText) {
+    return null;
+  }
+  return { item, inputText, contextText, relatedMessageIds };
+}
+
 export function assignItem(itemId: number, guildId: string, userId: string, userName: string, actorId: string, actorName: string): void {
+  const learning = buildItemLearningPayload(itemId, guildId);
   db.query(`UPDATE items SET assignee_id = ?, assignee_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND guild_id = ?`).run(
     userId,
     userName,
     itemId,
     guildId
   );
+  if (learning) {
+    try {
+      recordLearningFeedback({
+        guildId,
+        domain: "scan_assignment",
+        inputText: learning.inputText,
+        contextText: learning.contextText,
+        initialOutput: learning.item.assignee_name ? `assigned to ${learning.item.assignee_name}` : "unassigned",
+        correctedOutput: `assigned to ${userName}`,
+        feedbackKind: "refined",
+        weight: 6,
+        itemId,
+        sourceMessageId: learning.relatedMessageIds[0] ?? learning.item.message_id,
+        relatedMessageId: learning.item.message_id
+      });
+    } catch (error) {
+      logError("issues.assignment.learning.failed", error, { guildId, itemId, userId });
+    }
+  }
   writeAuditLog({ guildId, actorId, actorName, action: "assign", target: String(itemId), details: { userId, userName } });
 }
 
@@ -996,6 +1052,7 @@ export function recategorizeItem(itemId: number, guildId: string, categoryName: 
   if (!item) {
     throw new Error("item not found");
   }
+  const learning = buildItemLearningPayload(itemId, guildId);
   const defaultAssignee = !item.assignee_id ? primaryCategoryAssignee(guildId, category) : { userId: item.assignee_id, userName: item.assignee_name };
   db.query(
     `UPDATE items
@@ -1005,11 +1062,29 @@ export function recategorizeItem(itemId: number, guildId: string, categoryName: 
             updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND guild_id = ?`
   ).run(category, defaultAssignee.userId ?? null, defaultAssignee.userName ?? null, itemId, guildId);
+  try {
+    recordLearningFeedback({
+      guildId,
+      domain: "scan_category",
+      inputText: learning?.inputText ?? item.content_preview,
+      contextText: learning?.contextText ?? `summary: ${item.summary}`,
+      initialOutput: item.category,
+      correctedOutput: category,
+      feedbackKind: item.category === category ? "confirmed" : "corrected",
+      weight: item.category === category ? 5 : 8,
+      itemId,
+      sourceMessageId: learning?.relatedMessageIds[0] ?? item.message_id,
+      relatedMessageId: item.message_id
+    });
+  } catch (error) {
+    logError("issues.recategorize.learning.failed", error, { guildId, itemId, from: item.category, to: category });
+  }
   writeAuditLog({ guildId, actorId, actorName, action: "recategorize", target: String(itemId), details: { category } });
   return category;
 }
 
 export function resolveItem(itemId: number, guildId: string, actorId: string, actorName: string): void {
+  const learning = buildItemLearningPayload(itemId, guildId);
   db.query(
     `UPDATE items
         SET status = 'resolved',
@@ -1018,16 +1093,36 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
             updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND guild_id = ?`
   ).run(actorName, itemId, guildId);
-  const relatedMessageIds = (db.query(
+  const relatedMessageIds = learning?.relatedMessageIds ?? (db.query(
     `SELECT message_id
        FROM item_messages
       WHERE item_id = ?`
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   reinforceKnowledgeFromResolvedMessages(guildId, relatedMessageIds);
+  if (learning) {
+    try {
+      recordLearningFeedback({
+        guildId,
+        domain: "scan_resolution",
+        inputText: learning.inputText,
+        contextText: learning.contextText,
+        initialOutput: "open",
+        correctedOutput: `resolved: ${learning.item.summary}`,
+        feedbackKind: "confirmed",
+        weight: 9,
+        itemId,
+        sourceMessageId: relatedMessageIds[0] ?? learning.item.message_id,
+        relatedMessageId: learning.item.message_id
+      });
+    } catch (error) {
+      logError("issues.resolve.learning.failed", error, { guildId, itemId });
+    }
+  }
   writeAuditLog({ guildId, actorId, actorName, action: "resolve", target: String(itemId) });
 }
 
 export function reopenItem(itemId: number, guildId: string, actorId: string, actorName: string): void {
+  const learning = buildItemLearningPayload(itemId, guildId);
   db.query(
     `UPDATE items
         SET status = 'open',
@@ -1036,12 +1131,31 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
             updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND guild_id = ?`
   ).run(itemId, guildId);
-  const relatedMessageIds = (db.query(
+  const relatedMessageIds = learning?.relatedMessageIds ?? (db.query(
     `SELECT message_id
        FROM item_messages
       WHERE item_id = ?`
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   relaxKnowledgeFromReopenedMessages(guildId, relatedMessageIds);
+  if (learning) {
+    try {
+      recordLearningFeedback({
+        guildId,
+        domain: "scan_resolution",
+        inputText: learning.inputText,
+        contextText: learning.contextText,
+        initialOutput: "resolved",
+        correctedOutput: `reopened: ${learning.item.summary}`,
+        feedbackKind: "corrected",
+        weight: 9,
+        itemId,
+        sourceMessageId: relatedMessageIds[0] ?? learning.item.message_id,
+        relatedMessageId: learning.item.message_id
+      });
+    } catch (error) {
+      logError("issues.reopen.learning.failed", error, { guildId, itemId });
+    }
+  }
   writeAuditLog({ guildId, actorId, actorName, action: "reopen", target: String(itemId) });
 }
 

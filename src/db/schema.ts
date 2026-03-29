@@ -222,6 +222,26 @@ export function migrate(): void {
       UNIQUE(guild_id, answer_message_id)
     );
 
+    CREATE TABLE IF NOT EXISTS learning_feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      input_text TEXT NOT NULL,
+      context_text TEXT,
+      initial_output TEXT,
+      corrected_output TEXT NOT NULL,
+      feedback_kind TEXT NOT NULL,
+      weight INTEGER NOT NULL DEFAULT 0,
+      reinforcement_count INTEGER NOT NULL DEFAULT 1,
+      item_id INTEGER REFERENCES items(id),
+      source_message_id TEXT,
+      related_message_id TEXT,
+      feedback_fingerprint TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(guild_id, feedback_fingerprint)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_items_guild_status ON items(guild_id, status);
     CREATE INDEX IF NOT EXISTS idx_items_message_id ON items(message_id);
     CREATE INDEX IF NOT EXISTS idx_items_author_category ON items(author_id, category);
@@ -237,6 +257,8 @@ export function migrate(): void {
     CREATE INDEX IF NOT EXISTS idx_chat_engagements_guild_anchor_message ON chat_engagements(guild_id, anchor_message_id);
     CREATE INDEX IF NOT EXISTS idx_knowledge_documents_guild_updated ON knowledge_documents(guild_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_knowledge_documents_guild_question ON knowledge_documents(guild_id, question_message_id);
+    CREATE INDEX IF NOT EXISTS idx_learning_feedback_guild_updated ON learning_feedback(guild_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_learning_feedback_guild_domain ON learning_feedback(guild_id, domain, updated_at DESC);
   `);
 
   if (!hasColumn("guild_config", "scan_emissions_channel_id")) {
