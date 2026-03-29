@@ -242,6 +242,11 @@ export interface KnowledgeDocumentRow {
   combined_text: string;
   content_fingerprint: string;
   source: "live" | "backfill";
+  feedback_kind: "unreviewed" | "confirmed" | "refined" | "corrected";
+  feedback_score: number;
+  related_bot_reply_message_id: string | null;
+  related_bot_classification: ChatClassification | null;
+  related_bot_confidence: ChatConfidence | null;
   created_at: string;
   updated_at: string;
 }
@@ -253,4 +258,5 @@ export interface KnowledgeMatch {
   answerText: string;
   answerAuthorName: string;
   score: number;
+  feedbackKind: "unreviewed" | "confirmed" | "refined" | "corrected";
 }

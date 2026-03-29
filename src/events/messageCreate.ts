@@ -1,12 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ChannelType, type Client, type GuildMember, type Message } from "discord.js";
-import { findChatConversation, isChatEnabled, listChatChannels, recordChatEngagement } from "../issues/store";
+import { findChatConversation, findChatEngagementByBotReply, isChatEnabled, listChatChannels, recordChatEngagement } from "../issues/store";
 import { findKnowledgeMatches, upsertKnowledgeDocument } from "../knowledge/store";
 import { completeJson } from "../llm/client";
 import { enrichGithubUrl } from "../integrations/github";
 import { logDebug, logError } from "../utils/logger";
-import { extractDefillamaEntityUrl, extractGithubUrls, isLowSignalKnowledgeReply, preview, sharedTokenCount } from "../utils/text";
+import { extractDefillamaEntityUrl, extractGithubUrls, isLowSignalKnowledgeReply, isWeakFollowUpText, preview, sharedTokenCount } from "../utils/text";
 import type { ChatClassification, ChatConfidence, GithubEnrichment } from "../types";
 
 const SUPPORT_EMAIL = "support@defillama.com";
@@ -33,6 +33,9 @@ const LLAMA_ROLE_NAME = "llama";
 const CHAT_KNOWLEDGE_MATCH_LIMIT = 3;
 const CHAT_FAQ_MATCH_LIMIT = 3;
 const CHAT_EXAMPLE_MATCH_LIMIT = 2;
+const CHAT_LEARNED_PRECEDENT_MIN_COUNT = 2;
+const CHAT_LEARNED_PRECEDENT_MIN_SCORE = 10;
+const CHAT_LEARNING_FALLBACK = "i'm still learning on that one, so let me get a llama for you. if you have any extra context or links, please drop them here and the team can pick it up faster.";
 const CHAT_KNOWLEDGE = [
   `DefiLlama support email is ${SUPPORT_EMAIL}.`,
   "If someone asks how to contact support or which email to use, give that email directly.",
@@ -77,8 +80,20 @@ interface ChatTriggerContext {
 interface ChatGrounding {
   faqMatches: string[];
   exampleMatches: string[];
-  knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string; score: number }>;
+  knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string; score: number; feedbackKind: "unreviewed" | "confirmed" | "refined" | "corrected" }>;
   githubSummaries: string[];
+}
+
+type LlamaFeedbackKind = "unreviewed" | "confirmed" | "refined" | "corrected";
+
+function parseLlamaFeedbackJudgment(raw: unknown): { kind: LlamaFeedbackKind; score: number } | null {
+  const payload = (raw && typeof raw === "object") ? raw as Record<string, unknown> : {};
+  const kind = typeof payload.kind === "string" ? payload.kind : null;
+  const score = typeof payload.score === "number" ? payload.score : null;
+  if ((kind === "confirmed" || kind === "refined" || kind === "corrected") && typeof score === "number") {
+    return { kind, score: Math.max(0, Math.min(8, Math.round(score))) };
+  }
+  return null;
 }
 
 function stripBotMention(text: string, botUserId: string): string {
@@ -272,11 +287,15 @@ function isEscalationQuestion(args: {
   defillamaUrl: string | null;
 }): boolean {
   const combined = `${args.anchor}\n${args.invocation}\n${args.message.content}`.toLowerCase();
-  const asksQuestion = combined.includes("?") || /\b(api|endpoint|support|issue|wrong|broken|missing|how|where|why|can|does|is there)\b/i.test(combined);
-  const hasGrounding = args.grounding.faqMatches.length > 0
-    || args.grounding.githubSummaries.length > 0
-    || args.grounding.knowledgeMatches.some((match) => match.score >= 6);
-  return asksQuestion && !hasGrounding && (args.message.mentions.users.size > 0 || Boolean(args.defillamaUrl) || combined.length >= 40);
+  const asksQuestion = combined.includes("?")
+    || /\b(api|endpoint|support|issue|wrong|broken|missing|how|where|why|what|can|does|will|is there)\b/i.test(combined)
+    || !isWeakFollowUpText(args.anchor);
+  const learnedMatches = args.grounding.knowledgeMatches.filter((match) =>
+    (match.feedbackKind === "confirmed" || match.feedbackKind === "refined")
+    && match.score >= CHAT_LEARNED_PRECEDENT_MIN_SCORE
+  );
+  const hasLearnedGoAhead = learnedMatches.length >= CHAT_LEARNED_PRECEDENT_MIN_COUNT;
+  return asksQuestion && !hasLearnedGoAhead && (args.message.mentions.users.size > 0 || Boolean(args.defillamaUrl) || combined.length >= 20);
 }
 
 async function getGithubEnrichmentCached(url: string): Promise<GithubEnrichment | null> {
@@ -333,7 +352,7 @@ function buildChatPrompt(args: {
   faqMatches: string[];
   exampleMatches: string[];
   trainingExamples: string | null;
-  knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string }>;
+  knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string; feedbackKind: LlamaFeedbackKind }>;
 }): { system: string; user: string } {
     const system = [
     "You are Cria, a public-facing DefiLlama Discord helper.",
@@ -367,7 +386,7 @@ function buildChatPrompt(args: {
     args.exampleMatches.length > 0 ? `Relevant curated support examples: ${args.exampleMatches.join(" | ")}` : null,
     args.trainingExamples ? `Recent Discord pairs (user -> team): ${args.trainingExamples}` : null,
     args.knowledgeMatches.length > 0
-      ? `Trusted llama support precedents: ${args.knowledgeMatches.map((match, index) => `${index + 1}. Question: ${match.questionText} Answer by ${match.answerAuthorName}: ${match.answerText}`).join(" ")}`
+      ? `Trusted llama support precedents: ${args.knowledgeMatches.map((match, index) => `${index + 1}. Question: ${match.questionText} ${match.feedbackKind === "unreviewed" ? "" : `Judgment: ${match.feedbackKind}. `}Answer by ${match.answerAuthorName}: ${match.answerText}`).join(" ")}`
       : null,
     "Use FAQ/doc matches as authoritative only when they clearly fit. Use examples and llama precedents as style/context, not rigid templates.",
     "Return JSON only with keys: classification, reply, needs_clarification, confidence.",
@@ -427,6 +446,80 @@ function buildKnowledgeContext(message: Message, chain: Message[]): string | nul
   return lines.length > 0 ? lines.join("\n") : null;
 }
 
+function classifyLlamaFeedback(args: {
+  questionText: string;
+  botReplyText: string;
+  botClassification: ChatClassification;
+  botConfidence: ChatConfidence;
+  llamaAnswerText: string;
+}): { kind: LlamaFeedbackKind; score: number } {
+  const normalizedBot = args.botReplyText.toLowerCase();
+  const botEscalated = normalizedBot.includes("let me get a llama")
+    || normalizedBot.includes("i'm not fully sure")
+    || normalizedBot.includes("i'm not fully sure yet");
+  const botToLlamaOverlap = sharedTokenCount(args.botReplyText, args.llamaAnswerText);
+  const questionToLlamaOverlap = sharedTokenCount(args.questionText, args.llamaAnswerText);
+
+  if (botEscalated || args.botClassification === "needs_clarification" || args.botConfidence === "low") {
+    return {
+      kind: questionToLlamaOverlap >= 2 ? "refined" : "confirmed",
+      score: questionToLlamaOverlap >= 2 ? 4 : 2
+    };
+  }
+
+  if (botToLlamaOverlap >= 4) {
+    return { kind: "confirmed", score: 2 };
+  }
+
+  if (botToLlamaOverlap >= 2 || questionToLlamaOverlap >= 2) {
+    return { kind: "refined", score: 4 };
+  }
+
+  return { kind: "corrected", score: 6 };
+}
+
+async function judgeLlamaFeedback(args: {
+  questionText: string;
+  botReplyText: string;
+  botClassification: ChatClassification;
+  botConfidence: ChatConfidence;
+  llamaAnswerText: string;
+}): Promise<{ kind: LlamaFeedbackKind; score: number }> {
+  const system = [
+    "You judge whether a human llama reply confirms, refines, or corrects an earlier Cria bot answer.",
+    "Return JSON only with keys: kind, score.",
+    "kind must be one of: confirmed, refined, corrected.",
+    "confirmed means the bot answer was already basically right.",
+    "refined means the llama mostly kept the bot direction but added or tightened important details.",
+    "corrected means the llama materially changed the meaning or fixed the bot answer.",
+    "score must be an integer from 0 to 8.",
+    "Use higher scores for stronger correction value. Typical ranges: confirmed 1-2, refined 3-5, corrected 6-8."
+  ].join(" ");
+
+  const user = [
+    `User question: ${args.questionText}`,
+    `Cria bot answer: ${args.botReplyText}`,
+    `Bot classification: ${args.botClassification}`,
+    `Bot confidence: ${args.botConfidence}`,
+    `Llama answer: ${args.llamaAnswerText}`
+  ].join("\n\n");
+
+  try {
+    const judged = parseLlamaFeedbackJudgment(await completeJson(system, user));
+    if (judged) {
+      return judged;
+    }
+  } catch (error) {
+    logError("chat.knowledge.feedback_judgment_failed", error, {
+      questionText: preview(args.questionText, 120),
+      botClassification: args.botClassification,
+      botConfidence: args.botConfidence
+    });
+  }
+
+  return classifyLlamaFeedback(args);
+}
+
 async function recordLlamaKnowledge(message: Message): Promise<void> {
   if (!message.guildId || !message.reference?.messageId || isLowSignalKnowledgeReply(message.content)) {
     return;
@@ -448,6 +541,19 @@ async function recordLlamaKnowledge(message: Message): Promise<void> {
 
   const conversationKey = question.id;
   const contextText = buildKnowledgeContext(question, chain.filter((entry) => entry.id !== question.id));
+  const botReply = message.client.user
+    ? chain.find((entry) => entry.author.id === message.client.user!.id) ?? null
+    : null;
+  const botEngagement = botReply ? findChatEngagementByBotReply(message.guildId, botReply.id) : null;
+  const feedback = botReply && botEngagement
+    ? await judgeLlamaFeedback({
+      questionText: question.content,
+      botReplyText: botReply.content,
+      botClassification: botEngagement.classification,
+      botConfidence: botEngagement.confidence,
+      llamaAnswerText: message.content
+    })
+    : { kind: "unreviewed" as const, score: 0 };
   const id = upsertKnowledgeDocument({
     guildId: message.guildId,
     channelId: message.channelId,
@@ -461,14 +567,22 @@ async function recordLlamaKnowledge(message: Message): Promise<void> {
     questionText: question.content,
     contextText,
     answerText: message.content,
-    source: "live"
+    source: "live",
+    feedbackKind: feedback.kind,
+    feedbackScore: feedback.score,
+    relatedBotReplyMessageId: botReply?.id ?? null,
+    relatedBotClassification: botEngagement?.classification ?? null,
+    relatedBotConfidence: botEngagement?.confidence ?? null
   });
   logDebug("chat.knowledge.recorded", {
     guildId: message.guildId,
     channelId: message.channelId,
     knowledgeId: id,
     questionMessageId: question.id,
-    answerMessageId: message.id
+    answerMessageId: message.id,
+    feedbackKind: feedback.kind,
+    feedbackScore: feedback.score,
+    relatedBotReplyMessageId: botReply?.id ?? null
   });
 }
 
@@ -503,6 +617,9 @@ async function routeChatReply(
     excludeMessageIds: [message.id, ...trigger.replyChain.map((entry) => entry.id)],
     limit: CHAT_KNOWLEDGE_MATCH_LIMIT
   });
+  const learnedKnowledgeMatches = knowledgeMatches.filter((match) =>
+    match.feedbackKind === "confirmed" || match.feedbackKind === "refined"
+  );
   const faqMatches = pickRelevantFaqSnippets(trainingDocs, combined);
   const exampleMatches = pickRelevantSections({
     raw: trainingExamplesDoc,
@@ -514,7 +631,7 @@ async function routeChatReply(
   const grounding: ChatGrounding = {
     faqMatches,
     exampleMatches,
-    knowledgeMatches,
+    knowledgeMatches: learnedKnowledgeMatches,
     githubSummaries
   };
   if (isEscalationQuestion({
@@ -525,7 +642,7 @@ async function routeChatReply(
     defillamaUrl
   })) {
     return {
-      reply: "i'm not fully sure on that one yet, so let me get a llama for you. if you have any extra context or links, please drop them here and the team can pick it up faster.",
+      reply: CHAT_LEARNING_FALLBACK,
       classification: "needs_clarification",
       confidence: "low",
       anchorMessageId: immediateReply && immediateReply.author.id !== botUserId ? immediateReply.id : null
@@ -546,13 +663,13 @@ async function routeChatReply(
     faqMatches,
     exampleMatches,
     trainingExamples,
-    knowledgeMatches
+    knowledgeMatches: learnedKnowledgeMatches
   });
 
   const decision = parseChatDecision(await completeJson(prompt.system, prompt.user));
   if (!decision.reply) {
     return {
-      reply: `i'm not fully sure yet. could you share the project name or a bit more context? you can also reach the team at ${SUPPORT_EMAIL}.`,
+      reply: CHAT_LEARNING_FALLBACK,
       classification: "needs_clarification",
       confidence: "low",
       anchorMessageId: immediateReply && immediateReply.author.id !== botUserId ? immediateReply.id : null

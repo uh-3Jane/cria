@@ -456,6 +456,36 @@ export function recordChatEngagement(args: {
   );
 }
 
+export function findChatEngagementByBotReply(guildId: string, botReplyMessageId: string): {
+  userMessageId: string;
+  classification: ChatClassification;
+  confidence: ChatConfidence;
+  needsClarification: boolean;
+} | null {
+  const row = db.query(
+    `SELECT user_message_id, classification, confidence, needs_clarification
+       FROM chat_engagements
+      WHERE guild_id = ? AND bot_reply_message_id = ?
+      LIMIT 1`
+  ).get(guildId, botReplyMessageId) as {
+    user_message_id: string;
+    classification: ChatClassification;
+    confidence: ChatConfidence;
+    needs_clarification: number;
+  } | null;
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    userMessageId: row.user_message_id,
+    classification: row.classification,
+    confidence: row.confidence,
+    needsClarification: row.needs_clarification === 1
+  };
+}
+
 export function getSkippableChatEngagedMessageIds(guildId: string, messageIds: string[]): Set<string> {
   if (messageIds.length === 0) {
     return new Set();

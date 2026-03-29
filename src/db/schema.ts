@@ -211,6 +211,11 @@ export function migrate(): void {
       combined_text TEXT NOT NULL,
       content_fingerprint TEXT NOT NULL,
       source TEXT NOT NULL DEFAULT 'live',
+      feedback_kind TEXT NOT NULL DEFAULT 'unreviewed',
+      feedback_score INTEGER NOT NULL DEFAULT 0,
+      related_bot_reply_message_id TEXT,
+      related_bot_classification TEXT,
+      related_bot_confidence TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(guild_id, answer_message_id)
@@ -290,6 +295,21 @@ export function migrate(): void {
   }
   if (!hasColumn("chat_engagements", "needs_clarification")) {
     db.exec(`ALTER TABLE chat_engagements ADD COLUMN needs_clarification INTEGER NOT NULL DEFAULT 0;`);
+  }
+  if (!hasColumn("knowledge_documents", "feedback_kind")) {
+    db.exec(`ALTER TABLE knowledge_documents ADD COLUMN feedback_kind TEXT NOT NULL DEFAULT 'unreviewed';`);
+  }
+  if (!hasColumn("knowledge_documents", "feedback_score")) {
+    db.exec(`ALTER TABLE knowledge_documents ADD COLUMN feedback_score INTEGER NOT NULL DEFAULT 0;`);
+  }
+  if (!hasColumn("knowledge_documents", "related_bot_reply_message_id")) {
+    db.exec(`ALTER TABLE knowledge_documents ADD COLUMN related_bot_reply_message_id TEXT;`);
+  }
+  if (!hasColumn("knowledge_documents", "related_bot_classification")) {
+    db.exec(`ALTER TABLE knowledge_documents ADD COLUMN related_bot_classification TEXT;`);
+  }
+  if (!hasColumn("knowledge_documents", "related_bot_confidence")) {
+    db.exec(`ALTER TABLE knowledge_documents ADD COLUMN related_bot_confidence TEXT;`);
   }
   if (!hasColumn("item_messages", "source_message_created_at")) {
     db.exec(`ALTER TABLE item_messages ADD COLUMN source_message_created_at DATETIME;`);
