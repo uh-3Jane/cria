@@ -1,22 +1,8 @@
 import type { FetchedMessage, LlmIssueCandidate } from "../types";
-import { extractGithubPullKey, extractReference, sharedTokenCount } from "../utils/text";
+import { extractGithubPullKey, likelySameTopic } from "../utils/text";
 
 export interface NormalizedCandidate extends LlmIssueCandidate {
   allMessageIds: string[];
-}
-
-function isSimilarTopic(left: string, right: string): boolean {
-  const leftPull = extractGithubPullKey(left);
-  const rightPull = extractGithubPullKey(right);
-  if (leftPull && rightPull && leftPull === rightPull) {
-    return true;
-  }
-  const leftRef = extractReference(left);
-  const rightRef = extractReference(right);
-  if (leftRef && rightRef && leftRef === rightRef) {
-    return true;
-  }
-  return sharedTokenCount(left, right) >= 4;
 }
 
 export function groupWithinScan(candidates: LlmIssueCandidate[], messagesById: Map<string, FetchedMessage>): NormalizedCandidate[] {
@@ -48,7 +34,7 @@ export function groupWithinScan(candidates: LlmIssueCandidate[], messagesById: M
       const otherMessage = messagesById.get(other.message_id);
       const left = `${current.summary} ${currentMessage?.content ?? ""}`;
       const right = `${other.summary} ${otherMessage?.content ?? ""}`;
-      if (!isSimilarTopic(left, right)) {
+      if (!likelySameTopic(left, right)) {
         continue;
       }
       merged.push(other);
@@ -100,15 +86,16 @@ export function groupAcrossScan(candidates: NormalizedCandidate[], messagesById:
       const left = `${current.summary} ${currentMessage?.content ?? ""}`;
       const right = `${other.summary} ${otherMessage?.content ?? ""}`;
       const samePull = Boolean(extractGithubPullKey(left) && extractGithubPullKey(left) === extractGithubPullKey(right));
-      if (current.category !== other.category && !samePull) {
+      const sameAuthor = current.user_id === other.user_id;
+      const sameTopic = likelySameTopic(left, right);
+      const sameReference = sameTopic;
+      if (current.category !== other.category && !samePull && !(sameAuthor && sameTopic)) {
         continue;
       }
-      const sameAuthor = current.user_id === other.user_id;
-      const sameReference = Boolean(extractReference(left) && extractReference(left) === extractReference(right));
       if (!sameAuthor && !sameReference && !samePull) {
         continue;
       }
-      if (!isSimilarTopic(left, right)) {
+      if (!sameTopic) {
         continue;
       }
       merged.push(other);

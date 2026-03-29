@@ -38,6 +38,47 @@ export function sharedTokenCount(left: string, right: string): number {
   return count;
 }
 
+export function likelySameTopic(left: string, right: string): boolean {
+  const leftRef = extractReference(left);
+  const rightRef = extractReference(right);
+  if (leftRef && rightRef && leftRef === rightRef) {
+    return true;
+  }
+
+  const leftTokens = new Set(tokenize(left));
+  const rightTokens = new Set(tokenize(right));
+  const overlap = sharedTokenCount(left, right);
+  if (overlap >= 4) {
+    return true;
+  }
+
+  const normalizedLeft = left
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[^a-z0-9\s:_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const normalizedRight = right
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[^a-z0-9\s:_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+  if (normalizedLeft === normalizedRight || normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)) {
+    return true;
+  }
+
+  const smallerSetSize = Math.min(leftTokens.size, rightTokens.size);
+  if (smallerSetSize <= 4 && overlap >= Math.max(2, smallerSetSize - 1)) {
+    return true;
+  }
+
+  return false;
+}
+
 export function extractReference(text: string): string | null {
   const url = text.match(/https?:\/\/\S+/)?.[0];
   if (url) {

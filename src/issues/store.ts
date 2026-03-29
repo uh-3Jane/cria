@@ -19,7 +19,7 @@ import type {
   Urgency
 } from "../types";
 import { ageLabel } from "../utils/time";
-import { contentFingerprint, extractGithubPullKey, extractGithubUrl, extractProjectName, extractReference, fingerprint, sharedTokenCount, preview, isWeakFollowUpText } from "../utils/text";
+import { contentFingerprint, extractGithubPullKey, extractGithubUrl, extractProjectName, fingerprint, likelySameTopic, preview, isWeakFollowUpText } from "../utils/text";
 
 const BUILTIN_CATEGORIES: Array<{ name: string; color: number }> = [
   { name: "listing", color: 0xfee75c },
@@ -164,41 +164,6 @@ function detectGithubUrlFromMessages(messages: FetchedMessage[]): string | null 
     }
   }
   return null;
-}
-
-function canonicalTopicText(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/https?:\/\/\S+/g, " ")
-    .replace(/[^a-z0-9\s:_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function likelySameTopic(left: string, right: string): boolean {
-  const leftPull = extractGithubPullKey(left);
-  const rightPull = extractGithubPullKey(right);
-  if (leftPull && rightPull && leftPull === rightPull) {
-    return true;
-  }
-  const leftRef = extractReference(left);
-  const rightRef = extractReference(right);
-  if (leftRef && rightRef && leftRef === rightRef) {
-    return true;
-  }
-
-  const overlap = sharedTokenCount(left, right);
-  if (overlap >= 4) {
-    return true;
-  }
-
-  const normalizedLeft = canonicalTopicText(left);
-  const normalizedRight = canonicalTopicText(right);
-  if (!normalizedLeft || !normalizedRight) {
-    return false;
-  }
-
-  return normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft);
 }
 
 function getGuildLookback(guildId: string, fallback: number): number {
@@ -727,10 +692,11 @@ function findDuplicateItem(input: NormalizedIssueInput): ItemRow | null {
     if (!sameAuthor && !samePull) {
       continue;
     }
-    if (!samePull && row.category !== input.category) {
+    const sameTopic = likelySameTopic(`${input.summary} ${input.content}`, `${row.summary} ${row.content_preview} ${row.github_url ?? ""}`);
+    if (!samePull && row.category !== input.category && !(sameAuthor && sameTopic)) {
       continue;
     }
-    if (likelySameTopic(`${input.summary} ${input.content}`, `${row.summary} ${row.content_preview} ${row.github_url ?? ""}`)) {
+    if (sameTopic) {
       return row;
     }
   }
