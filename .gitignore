@@ -5,3 +5,4 @@ data
 .env
 data.sqlite
 backups
+docs/chat_training_export.md
