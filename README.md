@@ -72,8 +72,8 @@ Never commit `.env`. This repo ignores it by default.
 
 For moving `cria` onto the DefiLlama main server:
 
-- migration checklist: [defillama_server_migration.md](/Users/uheux/Documents/Playground/cria/docs/defillama_server_migration.md)
-- ops runbook: [ops_runbook.md](/Users/uheux/Documents/Playground/cria/docs/ops_runbook.md)
+- migration checklist: [defillama_server_migration.md](docs/defillama_server_migration.md)
+- ops runbook: [ops_runbook.md](docs/ops_runbook.md)
 
 Helper scripts:
 

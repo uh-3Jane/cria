@@ -21,7 +21,7 @@ Use Docker Compose on the main server and keep the current mounted database layo
 - persistent DB path in container: `/app/data/cria.db`
 - host-side bind mount: `./data:/app/data`
 
-That matches the current [docker-compose.yml](/Users/uheux/Documents/Playground/cria/docker-compose.yml) behavior and keeps migration simple.
+That matches the current [docker-compose.yml](../docker-compose.yml) behavior and keeps migration simple.
 
 ## Pre-Cutover Checklist
 
