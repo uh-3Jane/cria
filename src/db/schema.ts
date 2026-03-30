@@ -242,6 +242,74 @@ export function migrate(): void {
       UNIQUE(guild_id, feedback_fingerprint)
     );
 
+    CREATE TABLE IF NOT EXISTS review_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      source_domain TEXT NOT NULL,
+      source_id INTEGER,
+      item_id INTEGER REFERENCES items(id),
+      source_message_id TEXT,
+      related_message_id TEXT,
+      raw_input TEXT NOT NULL,
+      raw_context TEXT,
+      raw_initial_output TEXT,
+      raw_corrected_output TEXT NOT NULL,
+      feedback_kind TEXT NOT NULL,
+      weight INTEGER NOT NULL DEFAULT 0,
+      reinforcement_count INTEGER NOT NULL DEFAULT 1,
+      priority INTEGER NOT NULL DEFAULT 0,
+      review_status TEXT NOT NULL DEFAULT 'pending',
+      promotion_status TEXT NOT NULL DEFAULT 'not_promoted',
+      notes TEXT,
+      last_reviewed_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(guild_id, source_domain, source_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS benchmark_cases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      source_review_id INTEGER REFERENCES review_queue(id),
+      source TEXT NOT NULL DEFAULT 'promoted_trace',
+      family TEXT NOT NULL,
+      outcome_type TEXT NOT NULL,
+      canonical_input TEXT NOT NULL,
+      canonical_context TEXT,
+      target_output TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      notes TEXT,
+      replaced_by_case_id INTEGER REFERENCES benchmark_cases(id),
+      last_reviewed_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS benchmark_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      triggered_by TEXT NOT NULL,
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'running',
+      active_case_count INTEGER NOT NULL DEFAULT 0,
+      passed_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at DATETIME
+    );
+
+    CREATE TABLE IF NOT EXISTS benchmark_run_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES benchmark_runs(id),
+      case_id INTEGER NOT NULL REFERENCES benchmark_cases(id),
+      family TEXT NOT NULL,
+      passed INTEGER NOT NULL,
+      actual_output TEXT,
+      score INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE INDEX IF NOT EXISTS idx_items_guild_status ON items(guild_id, status);
     CREATE INDEX IF NOT EXISTS idx_items_message_id ON items(message_id);
     CREATE INDEX IF NOT EXISTS idx_items_author_category ON items(author_id, category);
@@ -259,6 +327,11 @@ export function migrate(): void {
     CREATE INDEX IF NOT EXISTS idx_knowledge_documents_guild_question ON knowledge_documents(guild_id, question_message_id);
     CREATE INDEX IF NOT EXISTS idx_learning_feedback_guild_updated ON learning_feedback(guild_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_learning_feedback_guild_domain ON learning_feedback(guild_id, domain, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_review_queue_guild_status ON review_queue(guild_id, review_status, priority DESC, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_review_queue_guild_domain ON review_queue(guild_id, source_domain, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_benchmark_cases_guild_status ON benchmark_cases(guild_id, status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_benchmark_runs_guild_started ON benchmark_runs(guild_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_benchmark_run_results_run ON benchmark_run_results(run_id, family, passed);
   `);
 
   if (!hasColumn("guild_config", "scan_emissions_channel_id")) {

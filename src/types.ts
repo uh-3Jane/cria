@@ -11,6 +11,11 @@ export type ChatClassification =
 export type ChatConfidence = "high" | "medium" | "low";
 export type LearningFeedbackDomain = "chat_answer" | "scan_category" | "scan_resolution" | "scan_assignment";
 export type LearningFeedbackKind = "confirmed" | "refined" | "corrected";
+export type ReviewStatus = "pending" | "reviewed_good" | "reviewed_corrected" | "discarded" | "stale";
+export type ReviewPromotionStatus = "not_promoted" | "promoted" | "retired";
+export type BenchmarkOutcomeType = "answer" | "escalate" | "category" | "assignment_expectation" | "resolution_expectation";
+export type BenchmarkStatus = "active" | "stale" | "retired";
+export type BenchmarkSource = "promoted_trace" | "manual";
 
 export type Category = string;
 
@@ -295,4 +300,86 @@ export interface LearningFeedbackMatch {
   weight: number;
   reinforcementCount: number;
   score: number;
+}
+
+export interface ReviewQueueRow {
+  id: number;
+  guild_id: string;
+  source_domain: LearningFeedbackDomain;
+  source_id: number | null;
+  item_id: number | null;
+  source_message_id: string | null;
+  related_message_id: string | null;
+  raw_input: string;
+  raw_context: string | null;
+  raw_initial_output: string | null;
+  raw_corrected_output: string;
+  feedback_kind: LearningFeedbackKind;
+  weight: number;
+  reinforcement_count: number;
+  priority: number;
+  review_status: ReviewStatus;
+  promotion_status: ReviewPromotionStatus;
+  notes: string | null;
+  last_reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReviewedPrecedentMatch {
+  id: number;
+  domain: LearningFeedbackDomain;
+  inputText: string;
+  contextText: string | null;
+  initialOutput: string | null;
+  correctedOutput: string;
+  feedbackKind: LearningFeedbackKind;
+  reviewStatus: ReviewStatus;
+  promotionStatus: ReviewPromotionStatus;
+  weight: number;
+  reinforcementCount: number;
+  score: number;
+}
+
+export interface BenchmarkCaseRow {
+  id: number;
+  guild_id: string;
+  source_review_id: number | null;
+  source: BenchmarkSource;
+  family: string;
+  outcome_type: BenchmarkOutcomeType;
+  canonical_input: string;
+  canonical_context: string | null;
+  target_output: string;
+  status: BenchmarkStatus;
+  notes: string | null;
+  replaced_by_case_id: number | null;
+  last_reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BenchmarkRunRow {
+  id: number;
+  guild_id: string;
+  triggered_by: string;
+  notes: string | null;
+  status: ScanStatus;
+  active_case_count: number;
+  passed_count: number;
+  failed_count: number;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface BenchmarkRunResultRow {
+  id: number;
+  run_id: number;
+  case_id: number;
+  family: string;
+  passed: number;
+  actual_output: string | null;
+  score: number;
+  notes: string | null;
+  created_at: string;
 }

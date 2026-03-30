@@ -5,9 +5,11 @@ import { registerCommands } from "./commands/register";
 import { registerInteractionHandler } from "./events/interactionCreate";
 import { registerMessageCreateHandler } from "./events/messageCreate";
 import { registerReadyHandler } from "./events/ready";
+import { syncReviewQueueFromLearningFeedback } from "./review/store";
 
 await registerCommands();
 migrate();
+syncReviewQueueFromLearningFeedback(config.guildId);
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],

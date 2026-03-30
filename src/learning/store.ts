@@ -1,4 +1,5 @@
 import { db } from "../db/client";
+import { upsertReviewQueueFromLearningFeedback } from "../review/store";
 import type {
   LearningFeedbackDomain,
   LearningFeedbackKind,
@@ -125,6 +126,26 @@ export function recordLearningFeedback(input: RecordLearningFeedbackInput): numb
   if (!row) {
     throw new Error("failed to record learning feedback");
   }
+  upsertReviewQueueFromLearningFeedback({
+    guildId: input.guildId,
+    sourceDomain: input.domain,
+    sourceId: row.id,
+    itemId: input.itemId ?? null,
+    sourceMessageId: input.sourceMessageId ?? null,
+    relatedMessageId: input.relatedMessageId ?? null,
+    rawInput: normalizedInput,
+    rawContext: normalizedContext,
+    rawInitialOutput: normalizedInitial,
+    rawCorrectedOutput: normalizedCorrected,
+    feedbackKind: input.feedbackKind,
+    weight: Math.max(0, input.weight ?? 0),
+    reinforcementCount: (db.query(
+      `SELECT reinforcement_count
+         FROM learning_feedback
+        WHERE id = ?
+        LIMIT 1`
+    ).get(row.id) as { reinforcement_count: number }).reinforcement_count
+  });
   return row.id;
 }
 

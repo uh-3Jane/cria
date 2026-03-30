@@ -2,7 +2,7 @@ import { config } from "../config";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { findKnowledgeMatches } from "../knowledge/store";
-import { findLearningFeedbackMatches } from "../learning/store";
+import { findReviewedPrecedentMatches } from "../review/store";
 import { completeJson } from "../llm/client";
 import type { FetchedMessage, LlmIssueCandidate } from "../types";
 import { logDebug, logError } from "../utils/logger";
@@ -260,7 +260,7 @@ function precedentLines(message: FetchedMessage): string {
 }
 
 function learningLines(message: FetchedMessage): string {
-  const matches = findLearningFeedbackMatches({
+  const matches = findReviewedPrecedentMatches({
     guildId: message.guildId,
     query: message.content,
     domains: ["scan_category", "scan_resolution", "scan_assignment"],

@@ -6,7 +6,10 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
-    "typecheck": "bun x tsc --noEmit"
+    "typecheck": "bun x tsc --noEmit",
+    "review": "bun run src/review/cli.ts",
+    "benchmark:run": "bun run src/review/cli.ts benchmark:run",
+    "benchmark:summary": "bun run src/review/cli.ts benchmark:summary"
   },
   "dependencies": {
     "discord.js": "^14.16.3"

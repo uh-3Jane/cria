@@ -3,8 +3,9 @@ import { resolve } from "node:path";
 import { ChannelType, type Client, type GuildMember, type Message } from "discord.js";
 import { findChatConversation, findChatEngagementByBotReply, isChatEnabled, listChatChannels, recordChatEngagement } from "../issues/store";
 import { findKnowledgeMatches, upsertKnowledgeDocument } from "../knowledge/store";
-import { findLearningFeedbackMatches, recordLearningFeedback } from "../learning/store";
+import { recordLearningFeedback } from "../learning/store";
 import { completeJson } from "../llm/client";
+import { findReviewedPrecedentMatches } from "../review/store";
 import { enrichGithubUrl } from "../integrations/github";
 import { logDebug, logError } from "../utils/logger";
 import { extractDefillamaEntityUrl, extractGithubUrls, isLowSignalKnowledgeReply, isWeakFollowUpText, preview, sharedTokenCount } from "../utils/text";
@@ -646,7 +647,7 @@ async function routeChatReply(
   const learnedKnowledgeMatches = knowledgeMatches.filter((match) =>
     match.feedbackKind === "confirmed" || match.feedbackKind === "refined"
   );
-  const learningMatches = findLearningFeedbackMatches({
+  const learningMatches = findReviewedPrecedentMatches({
     guildId: message.guildId!,
     query: combined,
     limit: CHAT_KNOWLEDGE_MATCH_LIMIT
