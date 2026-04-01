@@ -63,7 +63,7 @@ function detectHumanHandling(
   input: NormalizedIssueInput,
   channelMessages: Map<string, FetchedMessage[]>,
   knownHandlerIds: Set<string>
-): { repliedAt: string; replyUserId: string | null; replyName: string | null } | null {
+): { repliedAt: string; replyUserId: string | null; replyName: string | null; replyText: string | null } | null {
   const phrases = ["looking into it", "checking", "team is working on it", "fixed now", "should be better now", "next hourly update"];
   const messages = channelMessages.get(input.channelId) ?? [];
   const inputTime = Date.parse(input.createdAt);
@@ -87,7 +87,8 @@ function detectHumanHandling(
   return {
     repliedAt: match.createdAt,
     replyUserId: match.authorId,
-    replyName: match.authorName
+    replyName: match.authorName,
+    replyText: match.content
   };
 }
 
@@ -462,7 +463,7 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
       }
       const reply = detectHumanHandling(normalized, messagesByChannel, knownHandlerIds);
       if (reply) {
-        updateHumanReply(itemId, reply.repliedAt, reply.replyUserId, reply.replyName);
+        updateHumanReply(itemId, reply.repliedAt, reply.replyUserId, reply.replyName, reply.replyText);
       }
     }
 

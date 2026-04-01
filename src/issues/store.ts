@@ -154,6 +154,7 @@ function rowToItem(row: Record<string, unknown>): ItemRow {
     last_human_reply_at: optionalString("last_human_reply_at"),
     last_human_reply_user_id: optionalString("last_human_reply_user_id"),
     last_human_reply_name: optionalString("last_human_reply_name"),
+    last_human_reply_text: optionalString("last_human_reply_text"),
     scan_id: typeof row.scan_id === "number" ? row.scan_id : null
   };
 }
@@ -1004,8 +1005,10 @@ function buildItemLearningPayload(itemId: number, guildId: string): {
       `summary: ${item.summary}`,
       `category: ${item.category}`,
       `urgency: ${item.urgency}`,
-      `author: ${item.author_name}`
-    ].join("\n"),
+      `author: ${item.author_name}`,
+      item.last_human_reply_name ? `last_human_reply_by: ${item.last_human_reply_name}` : null,
+      item.last_human_reply_text ? `last_human_reply_text: ${item.last_human_reply_text}` : null
+    ].filter((value): value is string => Boolean(value)).join("\n"),
     1_500
   );
   const relatedMessageIds = relatedMessages.map((message) => message.message_id);
@@ -1100,6 +1103,9 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   reinforceKnowledgeFromResolvedMessages(guildId, relatedMessageIds);
   if (learning) {
+    const resolutionSummary = learning.item.last_human_reply_text
+      ? `resolved after human reply: ${learning.item.last_human_reply_text}`
+      : `resolved: ${learning.item.summary}`;
     try {
       recordLearningFeedback({
         guildId,
@@ -1107,7 +1113,7 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
         inputText: learning.inputText,
         contextText: learning.contextText,
         initialOutput: "open",
-        correctedOutput: `resolved: ${learning.item.summary}`,
+        correctedOutput: resolutionSummary,
         feedbackKind: "confirmed",
         weight: 9,
         itemId,
@@ -1138,6 +1144,9 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   relaxKnowledgeFromReopenedMessages(guildId, relatedMessageIds);
   if (learning) {
+    const reopenSummary = learning.item.last_human_reply_text
+      ? `reopened after human reply: ${learning.item.last_human_reply_text}`
+      : `reopened: ${learning.item.summary}`;
     try {
       recordLearningFeedback({
         guildId,
@@ -1145,7 +1154,7 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
         inputText: learning.inputText,
         contextText: learning.contextText,
         initialOutput: "resolved",
-        correctedOutput: `reopened: ${learning.item.summary}`,
+        correctedOutput: reopenSummary,
         feedbackKind: "corrected",
         weight: 9,
         itemId,
@@ -1255,13 +1264,20 @@ export function getScanChannel(guildId: string): string | null {
   return getScanEmissionsChannelId(guildId);
 }
 
-export function updateHumanReply(itemId: number, replyAtIso: string, replyUserId: string | null, replyName: string | null): void {
+export function updateHumanReply(
+  itemId: number,
+  replyAtIso: string,
+  replyUserId: string | null,
+  replyName: string | null,
+  replyText: string | null
+): void {
   db.query(
     `UPDATE items
         SET last_human_reply_at = ?,
             last_human_reply_user_id = ?,
             last_human_reply_name = ?,
+            last_human_reply_text = COALESCE(?, last_human_reply_text),
             updated_at = CURRENT_TIMESTAMP
       WHERE id = ?`
-  ).run(replyAtIso, replyUserId, replyName, itemId);
+  ).run(replyAtIso, replyUserId, replyName, replyText, itemId);
 }

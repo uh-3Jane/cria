@@ -273,6 +273,7 @@ function learningLines(message: FetchedMessage): string {
     .map((match, index) => [
       `learning_${index + 1}_domain: ${match.domain}`,
       `learning_${index + 1}_input: ${preview(match.inputText, 220)}`,
+      `learning_${index + 1}_context: ${match.contextText ? preview(match.contextText, 220) : "(none)"}`,
       `learning_${index + 1}_from: ${match.initialOutput ?? "(none)"}`,
       `learning_${index + 1}_to: ${preview(match.correctedOutput, 220)}`,
       `learning_${index + 1}_kind: ${match.feedbackKind}`,

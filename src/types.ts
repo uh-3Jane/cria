@@ -106,6 +106,7 @@ export interface ItemRow {
   last_human_reply_at: string | null;
   last_human_reply_user_id: string | null;
   last_human_reply_name: string | null;
+  last_human_reply_text: string | null;
   scan_id: number | null;
 }
 
