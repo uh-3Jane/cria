@@ -244,20 +244,21 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
   }
   if (action === "assign") {
     logDebug("interaction.button.assign.open_menu", { itemId, guildId: interaction.guildId, userId: interaction.user.id, interactionMessageId: interaction.message.id });
+    await interaction.deferReply({ ephemeral: true });
     if (!interaction.guild) {
-      await interaction.reply({ content: "guild only action.", ephemeral: true });
+      await interaction.editReply({ content: "guild only action.", components: [] });
       return;
     }
     const options = await listLlamaOptions(interaction.guild);
     if (options.length === 0) {
-      await interaction.reply({ content: "no members with the llama role were found in this server.", ephemeral: true });
+      await interaction.editReply({ content: "no members with the llama role were found in this server.", components: [] });
       return;
     }
     const select = new StringSelectMenuBuilder()
       .setCustomId(`assignuser:${itemId}:${interaction.message.id}`)
       .setPlaceholder("pick a llama")
       .addOptions(options);
-    await interaction.reply({ components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)], ephemeral: true });
+    await interaction.editReply({ components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)] });
     return;
   }
   if (action === "category") {
