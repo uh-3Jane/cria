@@ -5,6 +5,7 @@ import {
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Client,
+  type Guild,
   type Interaction
 } from "discord.js";
 import { assertAdmin } from "../access";
@@ -49,11 +50,16 @@ function parseCustomId(customId: string): string[] {
   return customId.split(":");
 }
 
-async function listLlamaOptions(guild: NonNullable<Interaction["guild"]>): Promise<Array<{ label: string; value: string; description?: string }>> {
+async function listLlamaOptions(guild: Guild): Promise<Array<{ label: string; value: string; description?: string }>> {
+  const llamaRole = guild.roles.cache.find((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME)
+    ?? (await guild.roles.fetch().then(() => guild.roles.cache.find((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME)));
+  if (!llamaRole) {
+    return [];
+  }
   const members = await guild.members.fetch();
   return members
     .filter((member) => !member.user.bot)
-    .filter((member) => member.roles.cache.some((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME))
+    .filter((member) => member.roles.cache.has(llamaRole.id))
     .map((member) => ({
       label: member.displayName.slice(0, 100),
       value: member.id,
