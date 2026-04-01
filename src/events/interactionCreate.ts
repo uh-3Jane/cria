@@ -2,7 +2,6 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   StringSelectMenuBuilder,
-  UserSelectMenuBuilder,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Client,
@@ -14,6 +13,8 @@ import { runScan } from "../commands/scan";
 import { assignItem, getActiveCategoryNames, getItem, getItems, recategorizeItem, resolveItem, reopenItem, snoozeItem, unsnoozeItem } from "../issues/store";
 import { getDigestSession, itemCardPayload, renderIssuePage, replaceSessionCards, setDigestPage, summaryMessagePayload } from "../issues/digest";
 import { logDebug, logError } from "../utils/logger";
+
+const LLAMA_ROLE_NAME = "llama";
 
 async function handleCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   switch (interaction.commandName) {
@@ -46,6 +47,22 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
 
 function parseCustomId(customId: string): string[] {
   return customId.split(":");
+}
+
+async function listLlamaOptions(guild: NonNullable<Interaction["guild"]>): Promise<Array<{ label: string; value: string; description?: string }>> {
+  const members = await guild.members.fetch();
+  return members
+    .filter((member) => !member.user.bot)
+    .filter((member) => member.roles.cache.some((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME))
+    .map((member) => ({
+      label: member.displayName.slice(0, 100),
+      value: member.id,
+      description: member.user.username && member.user.username !== member.displayName
+        ? member.user.username.slice(0, 100)
+        : undefined
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label))
+    .slice(0, 25);
 }
 
 async function refreshIssueList(interaction: ButtonInteraction, page: number): Promise<void> {
@@ -227,8 +244,20 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
   }
   if (action === "assign") {
     logDebug("interaction.button.assign.open_menu", { itemId, guildId: interaction.guildId, userId: interaction.user.id, interactionMessageId: interaction.message.id });
-    const select = new UserSelectMenuBuilder().setCustomId(`assignuser:${itemId}:${interaction.message.id}`).setPlaceholder("pick a llama");
-    await interaction.reply({ components: [new ActionRowBuilder<UserSelectMenuBuilder>().addComponents(select)], ephemeral: true });
+    if (!interaction.guild) {
+      await interaction.reply({ content: "guild only action.", ephemeral: true });
+      return;
+    }
+    const options = await listLlamaOptions(interaction.guild);
+    if (options.length === 0) {
+      await interaction.reply({ content: "no members with the llama role were found in this server.", ephemeral: true });
+      return;
+    }
+    const select = new StringSelectMenuBuilder()
+      .setCustomId(`assignuser:${itemId}:${interaction.message.id}`)
+      .setPlaceholder("pick a llama")
+      .addOptions(options);
+    await interaction.reply({ components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)], ephemeral: true });
     return;
   }
   if (action === "category") {
@@ -315,38 +344,28 @@ export function registerInteractionHandler(client: Client): void {
           await interaction.update({ content: `moved to ${category}.`, components: [] });
           return;
         }
-      }
-      if (interaction.isUserSelectMenu()) {
-        const [selectAction] = parseCustomId(interaction.customId);
-        debugRef = `interactionCreate/user-select/${selectAction}`;
-        logDebug("interaction.user_select.received", {
-          customId: interaction.customId,
-          action: selectAction,
-          values: interaction.values,
-          guildId: interaction.guildId,
-          channelId: interaction.channelId,
-          userId: interaction.user.id,
-          interactionMessageId: interaction.message.id,
-          deferred: interaction.deferred,
-          replied: interaction.replied
-        });
-        const [action, rawId, rawCardMessageId] = parseCustomId(interaction.customId);
-        if (!interaction.guildId || action !== "assignuser") {
+        if (action === "assignuser") {
+          if (!interaction.guildId) {
+            return;
+          }
+          const selectedUserId = interaction.values[0];
+          const member = interaction.guild ? await interaction.guild.members.fetch(selectedUserId).catch(() => null) : null;
+          if (!member || !member.roles.cache.some((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME)) {
+            await interaction.update({ content: "that member is not a llama in this server.", components: [] });
+            return;
+          }
+          assignItem(
+            itemId,
+            interaction.guildId,
+            member.id,
+            member.displayName,
+            interaction.user.id,
+            interaction.user.username
+          );
+          await refreshCardMessageById(interaction, interaction.guildId, itemId, rawCardMessageId);
+          await interaction.update({ content: `assigned to ${member.displayName}.`, components: [] });
           return;
         }
-        const itemId = Number(rawId);
-        const selectedUserId = interaction.values[0];
-        const selectedUser = await interaction.client.users.fetch(selectedUserId);
-        assignItem(
-          itemId,
-          interaction.guildId,
-          selectedUser.id,
-          selectedUser.username,
-          interaction.user.id,
-          interaction.user.username
-        );
-        await refreshCardMessageById(interaction, interaction.guildId, itemId, rawCardMessageId);
-        await interaction.update({ content: `assigned to ${selectedUser.username}.`, components: [] });
       }
     } catch (error) {
       logError("interaction.failed", error, {
