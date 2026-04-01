@@ -155,12 +155,39 @@ function rowToItem(row: Record<string, unknown>): ItemRow {
     last_human_reply_user_id: optionalString("last_human_reply_user_id"),
     last_human_reply_name: optionalString("last_human_reply_name"),
     last_human_reply_text: optionalString("last_human_reply_text"),
+    trace_state: (optionalString("trace_state") ?? "open") as ItemRow["trace_state"],
+    trace_state_confidence: (optionalString("trace_state_confidence") ?? "low") as ItemRow["trace_state_confidence"],
+    trace_answer_message_id: optionalString("trace_answer_message_id"),
+    trace_answer_author_id: optionalString("trace_answer_author_id"),
+    trace_answer_author_name: optionalString("trace_answer_author_name"),
+    trace_answer_text: optionalString("trace_answer_text"),
+    trace_answer_at: optionalString("trace_answer_at"),
+    trace_answer_role: optionalString("trace_answer_role") as ItemRow["trace_answer_role"],
     linked_llama_reply_message_id: optionalString("linked_llama_reply_message_id"),
     linked_llama_reply_author_id: optionalString("linked_llama_reply_author_id"),
     linked_llama_reply_author_name: optionalString("linked_llama_reply_author_name"),
     linked_llama_reply_text: optionalString("linked_llama_reply_text"),
     linked_llama_reply_at: optionalString("linked_llama_reply_at"),
     scan_id: typeof row.scan_id === "number" ? row.scan_id : null
+  };
+}
+
+function rowToItemMessage(row: Record<string, unknown>): ItemMessageRow {
+  return {
+    id: row.id as number,
+    item_id: row.item_id as number,
+    guild_id: row.guild_id as string,
+    channel_id: row.channel_id as string,
+    message_id: row.message_id as string,
+    reference_message_id: typeof row.reference_message_id === "string" ? row.reference_message_id : null,
+    message_url: row.message_url as string,
+    author_id: row.author_id as string,
+    author_name: row.author_name as string,
+    content_preview: typeof row.content_preview === "string" ? row.content_preview : null,
+    message_role: ((typeof row.message_role === "string" ? row.message_role : "user") as ItemMessageRow["message_role"]),
+    evidence_kind: ((typeof row.evidence_kind === "string" ? row.evidence_kind : "issue") as ItemMessageRow["evidence_kind"]),
+    source_message_created_at: typeof row.source_message_created_at === "string" ? row.source_message_created_at : null,
+    created_at: row.created_at as string
   };
 }
 
@@ -700,7 +727,21 @@ function findDuplicateItem(input: NormalizedIssueInput): ItemRow | null {
     if (!sameAuthor && !samePull) {
       continue;
     }
-    const sameTopic = likelySameTopic(`${input.summary} ${input.content}`, `${row.summary} ${row.content_preview} ${row.github_url ?? ""}`);
+    const relatedRows = db.query(
+      `SELECT content_preview
+         FROM item_messages
+        WHERE item_id = ?
+        ORDER BY COALESCE(source_message_created_at, created_at) DESC
+        LIMIT 6`
+    ).all(row.id) as Array<{ content_preview: string | null }>;
+    const relatedText = relatedRows
+      .map((entry) => entry.content_preview)
+      .filter((value): value is string => Boolean(value))
+      .join("\n");
+    const sameTopic = likelySameTopic(
+      `${input.summary} ${input.content}`,
+      `${row.summary} ${row.content_preview} ${relatedText} ${row.github_url ?? ""}`
+    );
     if (!samePull && row.category !== input.category && !(sameAuthor && sameTopic)) {
       continue;
     }
@@ -714,8 +755,8 @@ function findDuplicateItem(input: NormalizedIssueInput): ItemRow | null {
 function attachMessages(itemId: number, messages: FetchedMessage[]): void {
   const stmt = db.query(
     `INSERT OR IGNORE INTO item_messages
-       (item_id, guild_id, channel_id, message_id, message_url, author_id, author_name, content_preview, source_message_created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (item_id, guild_id, channel_id, message_id, reference_message_id, message_url, author_id, author_name, content_preview, message_role, evidence_kind, source_message_created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'user', 'issue', ?)`
   );
   for (const message of messages) {
     stmt.run(
@@ -723,11 +764,67 @@ function attachMessages(itemId: number, messages: FetchedMessage[]): void {
       message.guildId,
       message.channelId,
       message.messageId,
+      message.referenceMessageId,
       message.messageUrl,
       message.authorId,
       message.authorName,
       preview(message.content),
       message.createdAt
+    );
+  }
+}
+
+export function attachEvidenceMessages(
+  itemId: number,
+  messages: Array<{
+    guildId: string;
+    channelId: string;
+    messageId: string;
+    referenceMessageId: string | null;
+    messageUrl: string;
+    authorId: string;
+    authorName: string;
+    content: string;
+    createdAt: string;
+    role: ItemMessageRow["message_role"];
+  }>
+): void {
+  const insert = db.query(
+    `INSERT OR IGNORE INTO item_messages
+       (item_id, guild_id, channel_id, message_id, reference_message_id, message_url, author_id, author_name, content_preview, message_role, evidence_kind, source_message_created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'evidence', ?)`
+  );
+  const update = db.query(
+    `UPDATE item_messages
+        SET reference_message_id = COALESCE(?, reference_message_id),
+            content_preview = COALESCE(?, content_preview),
+            message_role = ?,
+            evidence_kind = 'evidence',
+            source_message_created_at = COALESCE(?, source_message_created_at)
+      WHERE item_id = ? AND message_id = ?`
+  );
+  for (const message of messages) {
+    const content = preview(message.content);
+    insert.run(
+      itemId,
+      message.guildId,
+      message.channelId,
+      message.messageId,
+      message.referenceMessageId,
+      message.messageUrl,
+      message.authorId,
+      message.authorName,
+      content,
+      message.role,
+      message.createdAt
+    );
+    update.run(
+      message.referenceMessageId,
+      content,
+      message.role,
+      message.createdAt,
+      itemId,
+      message.messageId
     );
   }
 }
@@ -914,9 +1011,12 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
   const relatedByItemId = new Map<number, Array<{
     channel_id: string;
     message_id: string;
+    reference_message_id: string | null;
     message_url: string;
     author_id: string;
     author_name: string;
+    message_role: ItemMessageRow["message_role"];
+    evidence_kind: ItemMessageRow["evidence_kind"];
     source_message_created_at: string | null;
     created_at: string;
     content_preview: string | null;
@@ -925,7 +1025,7 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
   if (itemIds.length > 0) {
     const placeholders = itemIds.map(() => "?").join(", ");
     const relatedRows = db.query(
-      `SELECT item_id, channel_id, message_id, message_url, author_id, author_name, source_message_created_at, created_at, content_preview
+      `SELECT item_id, channel_id, message_id, reference_message_id, message_url, author_id, author_name, message_role, evidence_kind, source_message_created_at, created_at, content_preview
          FROM item_messages
         WHERE item_id IN (${placeholders})
         ORDER BY item_id ASC, COALESCE(source_message_created_at, created_at) ASC`
@@ -933,9 +1033,12 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
       item_id: number;
       channel_id: string;
       message_id: string;
+      reference_message_id: string | null;
       message_url: string;
       author_id: string;
       author_name: string;
+      message_role: ItemMessageRow["message_role"];
+      evidence_kind: ItemMessageRow["evidence_kind"];
       source_message_created_at: string | null;
       created_at: string;
       content_preview: string | null;
@@ -955,22 +1058,20 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
     const item = rowToItem(raw);
     const related = relatedByItemId.get(item.id) ?? [];
     const firstReportedAt = related[0]?.source_message_created_at ?? related[0]?.created_at ?? item.source_message_created_at ?? item.created_at;
-    const displaySource = related
+    const sortedNewest = related
       .slice()
       .sort((left, right) => {
         const leftTime = left.source_message_created_at ?? left.created_at;
         const rightTime = right.source_message_created_at ?? right.created_at;
         return rightTime.localeCompare(leftTime);
-      })
-      .find((row) => row.content_preview && isIssueSignalText(row.content_preview))
-      ?? related
-        .slice()
-        .sort((left, right) => {
-          const leftTime = left.source_message_created_at ?? left.created_at;
-          const rightTime = right.source_message_created_at ?? right.created_at;
-          return rightTime.localeCompare(leftTime);
-        })
-        .find((row) => row.content_preview && !isWeakFollowUpText(row.content_preview))
+      });
+    const unresolvedUserSource = sortedNewest.find((row) =>
+      row.message_role === "user"
+      && row.content_preview
+      && isIssueSignalText(row.content_preview)
+    );
+    const displaySource = unresolvedUserSource
+      ?? sortedNewest.find((row) => row.content_preview && !isWeakFollowUpText(row.content_preview))
       ?? null;
     let bestPreview = displaySource?.content_preview ?? item.content_preview;
     if (bestPreview) {
@@ -1053,6 +1154,7 @@ export function getOpenItemsInLookback(guildId: string, lookbackHours: number): 
        ) related ON related.item_id = items.id
       WHERE items.guild_id = ?
         AND items.status = 'open'
+        AND COALESCE(items.trace_state, 'open') != 'resolved_by_trace'
         AND datetime(COALESCE(related.first_reported_at, items.source_message_created_at, items.created_at)) >= datetime('now', ?)
       ORDER BY datetime(COALESCE(related.first_reported_at, items.source_message_created_at, items.created_at)) ASC, items.id ASC`
   ).all(guildId, `-${lookbackHours} hours`) as Record<string, unknown>[];
@@ -1113,9 +1215,26 @@ export function linkLatestLlamaReplyToOpenItems(args: {
               linked_llama_reply_author_name = ?,
               linked_llama_reply_text = ?,
               linked_llama_reply_at = ?,
+              trace_state = CASE
+                WHEN trace_state = 'resolved_by_trace' THEN trace_state
+                ELSE 'likely_handled' END,
+              trace_state_confidence = CASE
+                WHEN trace_state_confidence = 'high' THEN trace_state_confidence
+                ELSE 'low' END,
+              trace_answer_message_id = ?,
+              trace_answer_author_id = ?,
+              trace_answer_author_name = ?,
+              trace_answer_text = ?,
+              trace_answer_at = ?,
+              trace_answer_role = 'llama',
               updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND guild_id = ?`
     ).run(
+      args.replyMessageId,
+      args.replyAuthorId,
+      args.replyAuthorName,
+      preview(args.replyText, 1_500),
+      args.replyCreatedAt,
       args.replyMessageId,
       args.replyAuthorId,
       args.replyAuthorName,
@@ -1130,8 +1249,51 @@ export function linkLatestLlamaReplyToOpenItems(args: {
   return linkedIds;
 }
 
+export function updateItemTraceState(args: {
+  itemId: number;
+  guildId: string;
+  traceState: ItemRow["trace_state"];
+  confidence: ItemRow["trace_state_confidence"];
+  answerMessageId?: string | null;
+  answerAuthorId?: string | null;
+  answerAuthorName?: string | null;
+  answerText?: string | null;
+  answerAt?: string | null;
+  answerRole?: ItemRow["trace_answer_role"];
+}): void {
+  db.query(
+    `UPDATE items
+        SET trace_state = ?,
+            trace_state_confidence = ?,
+            trace_answer_message_id = ?,
+            trace_answer_author_id = ?,
+            trace_answer_author_name = ?,
+            trace_answer_text = ?,
+            trace_answer_at = ?,
+            trace_answer_role = ?,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND guild_id = ?`
+  ).run(
+    args.traceState,
+    args.confidence,
+    args.answerMessageId ?? null,
+    args.answerAuthorId ?? null,
+    args.answerAuthorName ?? null,
+    args.answerText ? preview(args.answerText, 1_500) : null,
+    args.answerAt ?? null,
+    args.answerRole ?? null,
+    args.itemId,
+    args.guildId
+  );
+}
+
 export function getItemMessages(itemId: number): ItemMessageRow[] {
-  return db.query(`SELECT * FROM item_messages WHERE item_id = ? ORDER BY created_at ASC`).all(itemId) as ItemMessageRow[];
+  return (db.query(
+    `SELECT *
+       FROM item_messages
+      WHERE item_id = ?
+      ORDER BY COALESCE(source_message_created_at, created_at) ASC, id ASC`
+  ).all(itemId) as Record<string, unknown>[]).map(rowToItemMessage);
 }
 
 function buildItemLearningPayload(itemId: number, guildId: string): {
@@ -1145,7 +1307,9 @@ function buildItemLearningPayload(itemId: number, guildId: string): {
     return null;
   }
   const relatedMessages = getItemMessages(itemId);
-  const inputParts = relatedMessages
+  const issueMessages = relatedMessages.filter((message) => message.evidence_kind === "issue");
+  const evidenceMessages = relatedMessages.filter((message) => message.evidence_kind === "evidence");
+  const inputParts = issueMessages
     .map((message) => message.content_preview?.trim())
     .filter((value): value is string => Boolean(value));
   if (inputParts.length === 0 && item.content_preview.trim()) {
@@ -1158,10 +1322,19 @@ function buildItemLearningPayload(itemId: number, guildId: string): {
       `category: ${item.category}`,
       `urgency: ${item.urgency}`,
       `author: ${item.author_name}`,
+      `trace_state: ${item.trace_state}`,
+      `trace_state_confidence: ${item.trace_state_confidence}`,
+      item.trace_answer_author_name ? `trace_answer_by: ${item.trace_answer_author_name}` : null,
+      item.trace_answer_text ? `trace_answer_text: ${item.trace_answer_text}` : null,
       item.last_human_reply_name ? `last_human_reply_by: ${item.last_human_reply_name}` : null,
       item.last_human_reply_text ? `last_human_reply_text: ${item.last_human_reply_text}` : null,
       item.linked_llama_reply_author_name ? `linked_llama_reply_by: ${item.linked_llama_reply_author_name}` : null,
-      item.linked_llama_reply_text ? `linked_llama_reply_text: ${item.linked_llama_reply_text}` : null
+      item.linked_llama_reply_text ? `linked_llama_reply_text: ${item.linked_llama_reply_text}` : null,
+      evidenceMessages.length > 0
+        ? `trace_evidence:\n${evidenceMessages
+          .map((message) => `${message.message_role}: ${message.content_preview ?? ""}`.trim())
+          .join("\n")}`
+        : null
     ].filter((value): value is string => Boolean(value)).join("\n"),
     1_500
   );
@@ -1257,7 +1430,9 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   reinforceKnowledgeFromResolvedMessages(guildId, relatedMessageIds);
   if (learning) {
-    const resolutionSummary = learning.item.linked_llama_reply_text
+    const resolutionSummary = learning.item.trace_answer_text
+      ? learning.item.trace_answer_text
+      : learning.item.linked_llama_reply_text
       ? learning.item.linked_llama_reply_text
       : learning.item.last_human_reply_text
       ? `resolved after human reply: ${learning.item.last_human_reply_text}`
@@ -1300,7 +1475,7 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   relaxKnowledgeFromReopenedMessages(guildId, relatedMessageIds);
   if (learning) {
-    const reopenInitial = learning.item.linked_llama_reply_text ?? "resolved";
+    const reopenInitial = learning.item.trace_answer_text ?? learning.item.linked_llama_reply_text ?? "resolved";
     try {
       recordLearningFeedback({
         guildId,

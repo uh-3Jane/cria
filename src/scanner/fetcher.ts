@@ -168,6 +168,7 @@ export async function fetchGuildMessages(
           channelId: channel.id,
           channelName: "name" in channel && channel.name ? channel.name : channel.id,
           messageId: message.id,
+          referenceMessageId: message.reference?.messageId ?? null,
           messageUrl: message.url,
           authorId: message.author.id,
           authorName: message.author.username,

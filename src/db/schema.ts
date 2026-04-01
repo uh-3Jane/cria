@@ -51,6 +51,14 @@ export function migrate(): void {
       last_human_reply_user_id TEXT,
       last_human_reply_name TEXT,
       last_human_reply_text TEXT,
+      trace_state TEXT NOT NULL DEFAULT 'open',
+      trace_state_confidence TEXT NOT NULL DEFAULT 'low',
+      trace_answer_message_id TEXT,
+      trace_answer_author_id TEXT,
+      trace_answer_author_name TEXT,
+      trace_answer_text TEXT,
+      trace_answer_at DATETIME,
+      trace_answer_role TEXT,
       linked_llama_reply_message_id TEXT,
       linked_llama_reply_author_id TEXT,
       linked_llama_reply_author_name TEXT,
@@ -65,10 +73,13 @@ export function migrate(): void {
       guild_id TEXT NOT NULL,
       channel_id TEXT NOT NULL,
       message_id TEXT NOT NULL UNIQUE,
+      reference_message_id TEXT,
       message_url TEXT NOT NULL,
       author_id TEXT NOT NULL,
       author_name TEXT NOT NULL,
       content_preview TEXT,
+      message_role TEXT NOT NULL DEFAULT 'user',
+      evidence_kind TEXT NOT NULL DEFAULT 'issue',
       source_message_created_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -349,6 +360,30 @@ export function migrate(): void {
   if (!hasColumn("items", "last_human_reply_text")) {
     db.exec(`ALTER TABLE items ADD COLUMN last_human_reply_text TEXT;`);
   }
+  if (!hasColumn("items", "trace_state")) {
+    db.exec(`ALTER TABLE items ADD COLUMN trace_state TEXT NOT NULL DEFAULT 'open';`);
+  }
+  if (!hasColumn("items", "trace_state_confidence")) {
+    db.exec(`ALTER TABLE items ADD COLUMN trace_state_confidence TEXT NOT NULL DEFAULT 'low';`);
+  }
+  if (!hasColumn("items", "trace_answer_message_id")) {
+    db.exec(`ALTER TABLE items ADD COLUMN trace_answer_message_id TEXT;`);
+  }
+  if (!hasColumn("items", "trace_answer_author_id")) {
+    db.exec(`ALTER TABLE items ADD COLUMN trace_answer_author_id TEXT;`);
+  }
+  if (!hasColumn("items", "trace_answer_author_name")) {
+    db.exec(`ALTER TABLE items ADD COLUMN trace_answer_author_name TEXT;`);
+  }
+  if (!hasColumn("items", "trace_answer_text")) {
+    db.exec(`ALTER TABLE items ADD COLUMN trace_answer_text TEXT;`);
+  }
+  if (!hasColumn("items", "trace_answer_at")) {
+    db.exec(`ALTER TABLE items ADD COLUMN trace_answer_at DATETIME;`);
+  }
+  if (!hasColumn("items", "trace_answer_role")) {
+    db.exec(`ALTER TABLE items ADD COLUMN trace_answer_role TEXT;`);
+  }
   if (!hasColumn("items", "linked_llama_reply_message_id")) {
     db.exec(`ALTER TABLE items ADD COLUMN linked_llama_reply_message_id TEXT;`);
   }
@@ -438,8 +473,20 @@ export function migrate(): void {
     db.exec(`ALTER TABLE item_messages ADD COLUMN source_message_created_at DATETIME;`);
   }
 
+  if (!hasColumn("item_messages", "reference_message_id")) {
+    db.exec(`ALTER TABLE item_messages ADD COLUMN reference_message_id TEXT;`);
+  }
+
   if (!hasColumn("item_messages", "content_preview")) {
     db.exec(`ALTER TABLE item_messages ADD COLUMN content_preview TEXT;`);
+  }
+
+  if (!hasColumn("item_messages", "message_role")) {
+    db.exec(`ALTER TABLE item_messages ADD COLUMN message_role TEXT NOT NULL DEFAULT 'user';`);
+  }
+
+  if (!hasColumn("item_messages", "evidence_kind")) {
+    db.exec(`ALTER TABLE item_messages ADD COLUMN evidence_kind TEXT NOT NULL DEFAULT 'issue';`);
   }
 
   const itemMessageRows = db

@@ -440,26 +440,32 @@ export function findTrustedValidatedAnswerMatches(args: {
       && row.feedback_kind === "confirmed"
       && row.corrected_output.trim().length > 0
       && !row.corrected_output.toLowerCase().startsWith("resolved:")
-      && sharedTokenCount(args.query, row.input_text) >= 2
+      && (sharedTokenCount(args.query, row.input_text) >= 2 || (row.context_text ? sharedTokenCount(args.query, row.context_text) >= 2 : false))
     )
     .map((row) => {
       const confirmationCount = parsed.filter((candidate) =>
         candidate.domain === "scan_resolution"
         && candidate.feedback_kind === "confirmed"
         && sharedTokenCount(row.corrected_output, candidate.corrected_output) >= 2
-        && sharedTokenCount(args.query, candidate.input_text) >= 2
+        && (
+          sharedTokenCount(row.input_text, candidate.input_text) >= 2
+          || (row.context_text && candidate.context_text && sharedTokenCount(row.context_text, candidate.context_text) >= 2)
+        )
       ).length;
       const correctionCount = parsed.filter((candidate) =>
         candidate.domain === "scan_resolution"
         && candidate.feedback_kind === "corrected"
         && candidate.initial_output
         && sharedTokenCount(row.corrected_output, candidate.initial_output) >= 2
-        && sharedTokenCount(args.query, candidate.input_text) >= 2
+        && (
+          sharedTokenCount(row.input_text, candidate.input_text) >= 2
+          || (row.context_text && candidate.context_text && sharedTokenCount(row.context_text, candidate.context_text) >= 2)
+        )
       ).length;
       let score = sharedTokenCount(args.query, row.input_text) * 4;
       score += sharedTokenCount(args.query, row.corrected_output) * 3;
       if (row.context_text) {
-        score += sharedTokenCount(args.query, row.context_text);
+        score += sharedTokenCount(args.query, row.context_text) * 2;
       }
       score += row.weight;
       score += Math.min(confirmationCount * 3, 12);

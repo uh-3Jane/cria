@@ -2,17 +2,22 @@ import { EmbedBuilder, PermissionsBitField, type ChatInputCommandInteraction, ty
 import { config } from "../config";
 import { assertAdmin } from "../access";
 import { enrichGithubUrl } from "../integrations/github";
+import { completeJson } from "../llm/client";
 import { analyzeMessages } from "../scanner/analyzer";
 import { groupAcrossScan, groupWithinScan } from "../scanner/dedup";
 import { fetchGuildMessages, listScanChannels } from "../scanner/fetcher";
-import { createScan, failScan, finalizeScan, getActiveCategoryNames, getChannelScanCursors, getItem, getOpenItemsInLookback, getScanChannel, getScannedMessages, getSkippableChatEngagedMessageIds, isIgnoredCandidate, listAdmins, listAllCategoryAssigneeIds, recordScannedMessages, recoverStaleScans, updateChannelScanCursors, updateItemGithubMetadata, upsertIssue, updateHumanReply } from "../issues/store";
+import { attachEvidenceMessages, createScan, failScan, finalizeScan, getActiveCategoryNames, getChannelScanCursors, getItem, getItemMessages, getOpenItemsInLookback, getScanChannel, getScannedMessages, getSkippableChatEngagedMessageIds, isIgnoredCandidate, listAdmins, listAllCategoryAssigneeIds, recordScannedMessages, recoverStaleScans, updateChannelScanCursors, updateItemGithubMetadata, updateItemTraceState, upsertIssue, updateHumanReply } from "../issues/store";
 import { bindSummaryMessage, createDigestSession, replaceSessionCards, summaryMessagePayload } from "../issues/digest";
-import type { FetchedMessage, GithubEnrichment, NormalizedIssueInput, RenderedItem, ScanSummary } from "../types";
+import { findTrustedValidatedAnswerMatches } from "../review/store";
+import type { FetchedMessage, GithubEnrichment, ItemMessageRole, NormalizedIssueInput, RenderedItem, ScanSummary, TraceState, TraceStateConfidence } from "../types";
 import { hoursFromPeriod } from "../utils/time";
-import { contentFingerprint, extractGithubUrl, isLowSignalHelpMessage } from "../utils/text";
+import { contentFingerprint, extractGithubUrl, isIssueSignalText, isLowSignalHelpMessage, likelySameTopic, preview, sharedTokenCount } from "../utils/text";
 import { logDebug, logError, logInfo } from "../utils/logger";
 
 const GITHUB_REFRESH_WINDOW_MS = 6 * 60 * 60 * 1000;
+const LLAMA_ROLE_NAME = "llama";
+const TRACE_EVIDENCE_LIMIT = 12;
+const TRACE_EVIDENCE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const activeScans = new Map<string, { progressMessageId?: string; startedAt: number }>();
 
@@ -138,6 +143,173 @@ function groupMessagesByChannel(messages: FetchedMessage[]): Map<string, Fetched
     messagesForChannel.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
   return grouped;
+}
+
+async function classifyMessageRole(args: {
+  guild: Guild;
+  authorId: string;
+  issueAuthorIds: Set<string>;
+  knownHandlerIds: Set<string>;
+  roleCache: Map<string, Promise<ItemMessageRole>>;
+}): Promise<ItemMessageRole> {
+  if (args.issueAuthorIds.has(args.authorId)) {
+    return "user";
+  }
+  if (args.roleCache.has(args.authorId)) {
+    return args.roleCache.get(args.authorId)!;
+  }
+  const pending = (async (): Promise<ItemMessageRole> => {
+    try {
+      const member = await args.guild.members.fetch(args.authorId);
+      if (member.roles.cache.some((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME)) {
+        return "llama";
+      }
+    } catch {}
+    if (args.knownHandlerIds.has(args.authorId)) {
+      return "team";
+    }
+    return "other";
+  })();
+  args.roleCache.set(args.authorId, pending);
+  return pending;
+}
+
+function buildIssueQuery(messages: FetchedMessage[]): string {
+  return messages.map((message) => message.content).join("\n");
+}
+
+async function collectTraceEvidence(args: {
+  guild: Guild;
+  issueMessages: FetchedMessage[];
+  channelMessages: Map<string, FetchedMessage[]>;
+  knownHandlerIds: Set<string>;
+  roleCache: Map<string, Promise<ItemMessageRole>>;
+}): Promise<Array<FetchedMessage & { role: ItemMessageRole }>> {
+  const issueMessages = args.issueMessages
+    .slice()
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const firstIssue = issueMessages[0];
+  const lastIssue = issueMessages[issueMessages.length - 1];
+  if (!firstIssue || !lastIssue) {
+    return [];
+  }
+
+  const issueIds = new Set(issueMessages.map((message) => message.messageId));
+  const trackedIds = new Set(issueIds);
+  const issueAuthorIds = new Set(issueMessages.map((message) => message.authorId));
+  const issueQuery = buildIssueQuery(issueMessages);
+  const lowerBound = Date.parse(firstIssue.createdAt);
+  const upperBound = Date.parse(lastIssue.createdAt) + TRACE_EVIDENCE_WINDOW_MS;
+  const channelMessages = args.channelMessages.get(firstIssue.channelId) ?? [];
+  const evidence: Array<FetchedMessage & { role: ItemMessageRole }> = [];
+
+  for (const message of channelMessages) {
+    if (issueIds.has(message.messageId)) {
+      continue;
+    }
+    const createdAt = Date.parse(message.createdAt);
+    if (!Number.isFinite(createdAt) || createdAt <= lowerBound || createdAt > upperBound) {
+      continue;
+    }
+
+    const role = await classifyMessageRole({
+      guild: args.guild,
+      authorId: message.authorId,
+      issueAuthorIds,
+      knownHandlerIds: args.knownHandlerIds,
+      roleCache: args.roleCache
+    });
+    const replyLinked = Boolean(message.referenceMessageId && trackedIds.has(message.referenceMessageId));
+    const sameUserFollowUp = issueAuthorIds.has(message.authorId) && likelySameTopic(issueQuery, message.content);
+    const sameTopicResponder = (role === "llama" || role === "team") && (
+      replyLinked
+      || likelySameTopic(issueQuery, message.content)
+      || sharedTokenCount(issueQuery, message.content) >= 2
+    );
+    if (!(replyLinked || sameUserFollowUp || sameTopicResponder)) {
+      continue;
+    }
+    evidence.push({ ...message, role });
+    trackedIds.add(message.messageId);
+    if (evidence.length >= TRACE_EVIDENCE_LIMIT) {
+      break;
+    }
+  }
+
+  return evidence;
+}
+
+function parseTraceState(raw: unknown): {
+  traceState: TraceState;
+  confidence: TraceStateConfidence;
+  answerMessageId: string | null;
+} | null {
+  const payload = raw as Record<string, unknown>;
+  const traceState = typeof payload?.trace_state === "string" ? payload.trace_state : null;
+  const confidence = typeof payload?.confidence === "string" ? payload.confidence : null;
+  const answerMessageId = typeof payload?.answer_message_id === "string" ? payload.answer_message_id : null;
+  if (
+    (traceState === "open" || traceState === "likely_handled" || traceState === "resolved_by_trace" || traceState === "unclear")
+    && (confidence === "low" || confidence === "medium" || confidence === "high")
+  ) {
+    return { traceState, confidence, answerMessageId };
+  }
+  return null;
+}
+
+async function classifyTraceState(args: {
+  guildId: string;
+  issueMessages: FetchedMessage[];
+  evidenceMessages: Array<FetchedMessage & { role: ItemMessageRole }>;
+}): Promise<{ traceState: TraceState; confidence: TraceStateConfidence; answerMessageId: string | null }> {
+  if (args.evidenceMessages.length === 0) {
+    return { traceState: "open", confidence: "low", answerMessageId: null };
+  }
+
+  const query = buildIssueQuery(args.issueMessages);
+  const trusted = findTrustedValidatedAnswerMatches({
+    guildId: args.guildId,
+    query,
+    domains: ["scan_resolution"],
+    limit: 2
+  });
+
+  const system = [
+    "You classify the pre-review state of a Discord support conversation trace for DefiLlama.",
+    "Return JSON only with keys: trace_state, confidence, answer_message_id.",
+    "trace_state must be one of: open, likely_handled, resolved_by_trace, unclear.",
+    "confidence must be one of: low, medium, high.",
+    "Use explicit scan actions as the eventual source of truth, but classify based on the trace evidence you see now.",
+    "If there is a strong later llama/team reply that appears to answer or commit to the fix, prefer likely_handled.",
+    "Use resolved_by_trace only when a later answer appears definitive and there is no later contradictory user follow-up.",
+    "If a later user follow-up shows the issue is still not fixed, choose open.",
+    "answer_message_id must be the message_id of the strongest later llama/team answer when one exists, otherwise null."
+  ].join(" ");
+
+  const user = [
+    `Issue messages:\n${args.issueMessages.map((message) => `- ${message.messageId} | ${message.authorName}: ${preview(message.content, 280)}`).join("\n")}`,
+    `Later evidence messages:\n${args.evidenceMessages.map((message) => `- ${message.messageId} | ${message.role} | ${message.authorName}: ${preview(message.content, 280)}`).join("\n")}`,
+    `Trusted validated trace matches:\n${trusted.length > 0 ? trusted.map((match) => `- input: ${preview(match.inputText, 160)} | answer: ${preview(match.answerText, 160)} | confirmations: ${match.confirmationCount} | corrections: ${match.correctionCount}`).join("\n") : "(none)"}`
+  ].join("\n\n");
+
+  try {
+    const parsed = parseTraceState(await completeJson(system, user));
+    if (parsed) {
+      return parsed;
+    }
+  } catch (error) {
+    logError("scan.trace_state.classification_failed", error, {
+      guildId: args.guildId,
+      issueMessageIds: args.issueMessages.map((message) => message.messageId)
+    });
+  }
+
+  const fallbackAnswer = args.evidenceMessages.find((message) => message.role === "llama" || message.role === "team");
+  return {
+    traceState: fallbackAnswer ? "likely_handled" : "open",
+    confidence: fallbackAnswer ? "low" : "low",
+    answerMessageId: fallbackAnswer?.messageId ?? null
+  };
 }
 
 function itemGithubUrl(item: RenderedItem): string | null {
@@ -322,6 +494,7 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
     const newItemIds = new Set<number>();
     const scannedItemIds = new Set<number>();
     const itemIdsByMessageId = new Map<string, number>();
+    const memberRoleCache = new Map<string, Promise<ItemMessageRole>>();
 
     for (const candidate of grouped) {
       const primary = messagesById.get(candidate.message_id);
@@ -406,10 +579,63 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
       if (currentItem?.assignee_id) {
         knownHandlerIds.add(currentItem.assignee_id);
       }
+      const evidenceMessages = await collectTraceEvidence({
+        guild: interaction.guild,
+        issueMessages: allMessages,
+        channelMessages: messagesByChannel,
+        knownHandlerIds,
+        roleCache: memberRoleCache
+      });
+      if (evidenceMessages.length > 0) {
+        attachEvidenceMessages(itemId, evidenceMessages.map((message) => ({
+          guildId: message.guildId,
+          channelId: message.channelId,
+          messageId: message.messageId,
+          referenceMessageId: message.referenceMessageId,
+          messageUrl: message.messageUrl,
+          authorId: message.authorId,
+          authorName: message.authorName,
+          content: message.content,
+          createdAt: message.createdAt,
+          role: message.role
+        })));
+      }
       const reply = detectHumanHandling(normalized, messagesByChannel, knownHandlerIds);
       if (reply) {
         updateHumanReply(itemId, reply.repliedAt, reply.replyUserId, reply.replyName, reply.replyText);
       }
+      const traceState = await classifyTraceState({
+        guildId: interaction.guildId,
+        issueMessages: allMessages,
+        evidenceMessages
+      });
+      const traceAnswer = traceState.answerMessageId
+        ? evidenceMessages.find((message) => message.messageId === traceState.answerMessageId && (message.role === "team" || message.role === "llama")) ?? null
+        : null;
+      updateItemTraceState({
+        itemId,
+        guildId: interaction.guildId,
+        traceState: traceState.traceState,
+        confidence: traceState.confidence,
+        answerMessageId: traceAnswer?.messageId ?? null,
+        answerAuthorId: traceAnswer?.authorId ?? null,
+        answerAuthorName: traceAnswer?.authorName ?? null,
+        answerText: traceAnswer?.content ?? null,
+        answerAt: traceAnswer?.createdAt ?? null,
+        answerRole: traceAnswer?.role ?? null
+      });
+      if (traceAnswer && (traceAnswer.role === "team" || traceAnswer.role === "llama")) {
+        updateHumanReply(itemId, traceAnswer.createdAt, traceAnswer.authorId, traceAnswer.authorName, traceAnswer.content);
+      }
+      logDebug("scan.trace_state.updated", {
+        scanId,
+        guildId: interaction.guildId,
+        itemId,
+        traceState: traceState.traceState,
+        confidence: traceState.confidence,
+        evidenceCount: evidenceMessages.length,
+        answerMessageId: traceAnswer?.messageId ?? null
+      });
     }
 
     recordScannedMessages(interaction.guildId, scanId, [...messagesToAnalyze, ...messagesSkippedAsVague], itemIdsByMessageId);

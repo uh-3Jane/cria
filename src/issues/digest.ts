@@ -142,6 +142,27 @@ function humanReplyLine(item: RenderedItem): string | null {
   return `${actor} replied ${ageLabel(item.last_human_reply_at)}`;
 }
 
+function traceStateLine(item: RenderedItem): string | null {
+  if (item.trace_state === "likely_handled") {
+    return `Likely handled (${item.trace_state_confidence})`;
+  }
+  if (item.trace_state === "resolved_by_trace") {
+    return `Resolved by trace (${item.trace_state_confidence})`;
+  }
+  if (item.trace_state === "unclear") {
+    return `Trace unclear (${item.trace_state_confidence})`;
+  }
+  return null;
+}
+
+function traceAnswerLine(item: RenderedItem): string | null {
+  if (!item.trace_answer_text) {
+    return null;
+  }
+  const actor = item.trace_answer_author_name ? `${item.trace_answer_author_name}` : "team";
+  return `${actor}: ${truncateForCard(item.trace_answer_text)}`;
+}
+
 export function renderIssuePage(items: RenderedItem[], page: number, title = "issues"): {
   embeds: EmbedBuilder[];
   components: DigestRow[];
@@ -166,6 +187,7 @@ function compactItemBlock(item: RenderedItem): string {
   const lines = [
     `#${item.id} | ${item.category} | ${item.ageLabel}`,
     `<@${item.author_id}>: ${item.content_preview}`,
+    item.trace_state !== "open" ? `trace: ${item.trace_state} (${item.trace_state_confidence})` : null,
     item.relatedCount > 0 ? `+${item.relatedCount} related messages` : null,
     item.assignee_id ? `assigned: <@${item.assignee_id}>` : "assigned: none"
   ];
@@ -295,8 +317,16 @@ export function itemCardPayload(item: RenderedItem, guild: Guild | null): {
   }
 
   const handledLine = !isResolved ? humanReplyLine(item) : null;
+  const traceLine = !isResolved ? traceStateLine(item) : null;
+  const traceAnswer = !isResolved ? traceAnswerLine(item) : null;
   if (handledLine) {
     bodyLines.push("", handledLine);
+  }
+  if (traceLine) {
+    bodyLines.push("", traceLine);
+  }
+  if (traceAnswer) {
+    bodyLines.push("", traceAnswer);
   }
 
   if (!isResolved && item.assignee_id) {

@@ -1,5 +1,9 @@
 export type ItemStatus = "open" | "resolved" | "snoozed";
 export type Urgency = "high" | "medium" | "low";
+export type TraceState = "open" | "likely_handled" | "resolved_by_trace" | "unclear";
+export type TraceStateConfidence = "low" | "medium" | "high";
+export type ItemMessageRole = "user" | "llama" | "team" | "other";
+export type ItemMessageKind = "issue" | "evidence";
 export type ChatClassification =
   | "support_request"
   | "repo_followup"
@@ -48,6 +52,7 @@ export interface FetchedMessage {
   channelId: string;
   channelName: string;
   messageId: string;
+  referenceMessageId: string | null;
   messageUrl: string;
   authorId: string;
   authorName: string;
@@ -107,6 +112,14 @@ export interface ItemRow {
   last_human_reply_user_id: string | null;
   last_human_reply_name: string | null;
   last_human_reply_text: string | null;
+  trace_state: TraceState;
+  trace_state_confidence: TraceStateConfidence;
+  trace_answer_message_id: string | null;
+  trace_answer_author_id: string | null;
+  trace_answer_author_name: string | null;
+  trace_answer_text: string | null;
+  trace_answer_at: string | null;
+  trace_answer_role: ItemMessageRole | null;
   linked_llama_reply_message_id: string | null;
   linked_llama_reply_author_id: string | null;
   linked_llama_reply_author_name: string | null;
@@ -121,10 +134,13 @@ export interface ItemMessageRow {
   guild_id: string;
   channel_id: string;
   message_id: string;
+  reference_message_id: string | null;
   message_url: string;
   author_id: string;
   author_name: string;
   content_preview: string | null;
+  message_role: ItemMessageRole;
+  evidence_kind: ItemMessageKind;
   source_message_created_at: string | null;
   created_at: string;
 }
