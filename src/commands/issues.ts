@@ -166,9 +166,7 @@ export async function handleConfig(interaction: ChatInputCommandInteraction): Pr
     return;
   }
 
-  if (interaction.guild?.ownerId !== interaction.user.id) {
-    throw new Error("server owner only");
-  }
+  assertAdmin(interaction);
 
   if (subcommand === "emissions-set") {
     const channel = interaction.options.getChannel("channel", true);
@@ -284,15 +282,16 @@ export async function handleAdmin(interaction: ChatInputCommandInteraction): Pro
   if (!interaction.guildId) {
     throw new Error("guild only command");
   }
+  if (interaction.guild?.ownerId !== interaction.user.id) {
+    throw new Error("server owner only");
+  }
   const subcommand = interaction.options.getSubcommand(true);
   if (subcommand === "list") {
-    assertAdmin(interaction);
     const admins = listAdmins(interaction.guildId);
     await interaction.reply({ content: admins.length > 0 ? admins.map((id) => `<@${id}>`).join("\n") : "no admins yet.", ephemeral: true });
     return;
   }
   if (subcommand === "audit") {
-    assertAdmin(interaction);
     const entries = getAuditEntries(interaction.guildId, 20);
     await interaction.reply({
       content: entries.length > 0
@@ -301,9 +300,6 @@ export async function handleAdmin(interaction: ChatInputCommandInteraction): Pro
       ephemeral: true
     });
     return;
-  }
-  if (interaction.guild?.ownerId !== interaction.user.id) {
-    throw new Error("server owner only");
   }
   const user = interaction.options.getUser("user", true);
   if (subcommand === "add") {
