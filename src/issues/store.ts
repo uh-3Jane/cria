@@ -1073,6 +1073,7 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
     const displaySource = unresolvedUserSource
       ?? sortedNewest.find((row) => row.content_preview && !isWeakFollowUpText(row.content_preview))
       ?? null;
+    const displaySourceAt = displaySource?.source_message_created_at ?? displaySource?.created_at ?? firstReportedAt;
     let bestPreview = displaySource?.content_preview ?? item.content_preview;
     if (bestPreview) {
       bestPreview = bestPreview.replace(/\s+/g, " ").trim();
@@ -1091,8 +1092,8 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
       content_preview: bestPreview ?? item.content_preview,
       relatedCount: Math.max(0, related.length - 1),
       relatedChannels: Array.from(new Set(related.map((row) => row.channel_id))),
-      ageLabel: ageLabel(firstReportedAt),
-      source_message_created_at: firstReportedAt,
+      ageLabel: ageLabel(displaySourceAt),
+      source_message_created_at: displaySourceAt,
       categoryColor: categoryColors.get(item.category) ?? autoCategoryColor(item.category),
       projectName
     };
