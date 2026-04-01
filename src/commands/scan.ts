@@ -4,7 +4,7 @@ import { assertAdmin } from "../access";
 import { enrichGithubUrl } from "../integrations/github";
 import { analyzeMessages } from "../scanner/analyzer";
 import { groupAcrossScan, groupWithinScan } from "../scanner/dedup";
-import { fetchGuildMessages } from "../scanner/fetcher";
+import { fetchGuildMessages, listScanChannels } from "../scanner/fetcher";
 import { createScan, failScan, finalizeScan, getActiveCategoryNames, getChannelScanCursors, getItem, getOpenItemsInLookback, getScanChannel, getScannedMessages, getSkippableChatEngagedMessageIds, isIgnoredCandidate, listAdmins, listAllCategoryAssigneeIds, recordScannedMessages, recoverStaleScans, updateChannelScanCursors, updateItemGithubMetadata, upsertIssue, updateHumanReply } from "../issues/store";
 import { bindSummaryMessage, createDigestSession, replaceSessionCards, summaryMessagePayload } from "../issues/digest";
 import type { FetchedMessage, GithubEnrichment, NormalizedIssueInput, RenderedItem, ScanSummary } from "../types";
@@ -286,11 +286,8 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
   });
 
   try {
-    const scanChannels = await interaction.guild.channels.fetch();
-    const candidateChannelIds = scanChannels
-      .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel))
-      .filter((channel) => channel.isTextBased())
-      .map((channel) => channel.id);
+    const scanChannels = await listScanChannels(interaction.guild);
+    const candidateChannelIds = [...scanChannels.keys()];
     const cursors = getChannelScanCursors(interaction.guildId, candidateChannelIds);
     const fetched = await fetchGuildMessages(
       interaction.guild,

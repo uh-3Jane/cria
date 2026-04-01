@@ -1,6 +1,8 @@
 import {
   ChannelType,
+  PermissionsBitField,
   type Guild,
+  type GuildBasedChannel,
   type Message
 } from "discord.js";
 import type { ChannelScanCursorRow, FetchedMessage } from "../types";
@@ -16,6 +18,24 @@ function canScanChannel(channel: { type: ChannelType }): boolean {
     type === ChannelType.GuildAnnouncement ||
     type === ChannelType.PublicThread
   );
+}
+
+function isPubliclyVisibleChannel(guild: Guild, channel: GuildBasedChannel): boolean {
+  const permissions = channel.permissionsFor(guild.roles.everyone);
+  return Boolean(permissions?.has(PermissionsBitField.Flags.ViewChannel));
+}
+
+export async function listScanChannels(
+  guild: Guild,
+  channelOnlyId?: string
+): Promise<Map<string, GuildBasedChannel>> {
+  const channels = await guild.channels.fetch();
+  return channels
+    .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel))
+    .filter((channel) => channel.isTextBased())
+    .filter((channel) => canScanChannel(channel))
+    .filter((channel) => isPubliclyVisibleChannel(guild, channel))
+    .filter((channel) => !channelOnlyId || channel.id === channelOnlyId);
 }
 
 function sortMessages(messages: Message[]): Message[] {
@@ -34,12 +54,7 @@ export async function fetchGuildMessages(
   onChannelProgress?: (current: number, total: number, channelLabel: string) => Promise<void> | void
 ): Promise<{ messages: FetchedMessage[]; channelsScanned: number; skippedChannels: string[] }> {
   const cutoff = Date.now() - lookbackHours * 3_600_000;
-  const channels = await guild.channels.fetch();
-  const textChannels = channels
-    .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel))
-    .filter((channel) => channel.isTextBased())
-    .filter((channel) => canScanChannel(channel))
-    .filter((channel) => !channelOnlyId || channel.id === channelOnlyId);
+  const textChannels = await listScanChannels(guild, channelOnlyId);
 
   const results: FetchedMessage[] = [];
   const skippedChannels: string[] = [];
