@@ -1,8 +1,35 @@
 import type { FetchedMessage, LlmIssueCandidate } from "../types";
-import { extractGithubPullKey, likelySameTopic } from "../utils/text";
+import { extractGithubPullKey, isIssueSignalText, isWeakFollowUpText, likelySameTopic } from "../utils/text";
 
 export interface NormalizedCandidate extends LlmIssueCandidate {
   allMessageIds: string[];
+}
+
+function selectPrimaryCandidate(
+  candidates: NormalizedCandidate[],
+  messagesById: Map<string, FetchedMessage>
+): NormalizedCandidate {
+  const byNewest = candidates
+    .slice()
+    .sort((a, b) => {
+      const left = messagesById.get(a.message_id)?.createdAt ?? "";
+      const right = messagesById.get(b.message_id)?.createdAt ?? "";
+      return right.localeCompare(left);
+    });
+
+  const issueLike = byNewest.find((candidate) => {
+    const message = messagesById.get(candidate.message_id);
+    return isIssueSignalText(`${candidate.summary} ${message?.content ?? ""}`);
+  });
+  if (issueLike) {
+    return issueLike;
+  }
+
+  const strong = byNewest.find((candidate) => {
+    const message = messagesById.get(candidate.message_id);
+    return !isWeakFollowUpText(`${candidate.summary} ${message?.content ?? ""}`);
+  });
+  return strong ?? byNewest[0];
 }
 
 export function groupWithinScan(candidates: LlmIssueCandidate[], messagesById: Map<string, FetchedMessage>): NormalizedCandidate[] {
@@ -41,13 +68,7 @@ export function groupWithinScan(candidates: LlmIssueCandidate[], messagesById: M
       consumed.add(otherIndex);
     }
 
-    const primary = merged
-      .slice()
-      .sort((a, b) => {
-        const left = messagesById.get(a.message_id)?.createdAt ?? "";
-        const right = messagesById.get(b.message_id)?.createdAt ?? "";
-        return left.localeCompare(right);
-      })[0];
+    const primary = selectPrimaryCandidate(merged, messagesById);
 
     grouped.push({
       ...primary,
@@ -102,13 +123,7 @@ export function groupAcrossScan(candidates: NormalizedCandidate[], messagesById:
       consumed.add(otherIndex);
     }
 
-    const primary = merged
-      .slice()
-      .sort((a, b) => {
-        const left = messagesById.get(a.message_id)?.createdAt ?? "";
-        const right = messagesById.get(b.message_id)?.createdAt ?? "";
-        return left.localeCompare(right);
-      })[0];
+    const primary = selectPrimaryCandidate(merged, messagesById);
 
     grouped.push({
       ...primary,

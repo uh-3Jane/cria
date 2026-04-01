@@ -21,7 +21,7 @@ import type {
 } from "../types";
 import { logError } from "../utils/logger";
 import { ageLabel } from "../utils/time";
-import { contentFingerprint, extractGithubPullKey, extractGithubUrl, extractProjectName, fingerprint, likelySameTopic, preview, isWeakFollowUpText } from "../utils/text";
+import { contentFingerprint, extractGithubPullKey, extractGithubUrl, extractProjectName, fingerprint, isIssueSignalText, likelySameTopic, preview, isWeakFollowUpText } from "../utils/text";
 
 const BUILTIN_CATEGORIES: Array<{ name: string; color: number }> = [
   { name: "listing", color: 0xfee75c },
@@ -732,6 +732,22 @@ function attachMessages(itemId: number, messages: FetchedMessage[]): void {
   }
 }
 
+function shouldAdvancePrimaryIssue(existing: ItemRow, input: NormalizedIssueInput): boolean {
+  const existingAt = Date.parse(existing.source_message_created_at ?? existing.created_at);
+  const incomingAt = Date.parse(input.createdAt);
+  if (!Number.isFinite(incomingAt) || !Number.isFinite(existingAt) || incomingAt <= existingAt) {
+    return false;
+  }
+
+  const incomingSignal = isIssueSignalText(`${input.summary} ${input.content}`);
+  const existingSignal = isIssueSignalText(`${existing.summary} ${existing.content_preview}`);
+  if (incomingSignal) {
+    return true;
+  }
+
+  return !existingSignal && !isWeakFollowUpText(input.content);
+}
+
 export function upsertIssue(input: NormalizedIssueInput): { itemId: number; isNew: boolean } {
   ensureGuildCategories(input.guildId);
   const githubUrl = detectGithubUrlFromMessages(input.allMessages) ?? extractGithubUrl(input.content);
@@ -783,13 +799,53 @@ export function upsertIssue(input: NormalizedIssueInput): { itemId: number; isNe
   const duplicate = findDuplicateItem(input);
   if (duplicate) {
     attachMessages(duplicate.id, input.allMessages);
+    const category = resolveExistingCategoryName(input.guildId, input.category) ?? "general";
+    const shouldAdvance = shouldAdvancePrimaryIssue(duplicate, input);
     db.query(
-      `UPDATE items SET updated_at = CURRENT_TIMESTAMP, github_url = COALESCE(?, github_url), urgency = CASE
-         WHEN urgency = 'high' OR ? = 'high' THEN 'high'
-         WHEN urgency = 'medium' OR ? = 'medium' THEN 'medium'
-         ELSE 'low' END
-       WHERE id = ?`
-    ).run(githubUrl, input.urgency, input.urgency, duplicate.id);
+      `UPDATE items
+          SET channel_id = CASE WHEN ? THEN ? ELSE channel_id END,
+              message_id = CASE WHEN ? THEN ? ELSE message_id END,
+              message_url = CASE WHEN ? THEN ? ELSE message_url END,
+              author_id = CASE WHEN ? THEN ? ELSE author_id END,
+              author_name = CASE WHEN ? THEN ? ELSE author_name END,
+              content_preview = CASE WHEN ? THEN ? ELSE content_preview END,
+              summary = CASE WHEN ? THEN ? ELSE summary END,
+              category = CASE WHEN ? THEN ? ELSE category END,
+              source_message_created_at = CASE WHEN ? THEN ? ELSE source_message_created_at END,
+              scan_id = CASE WHEN ? THEN ? ELSE scan_id END,
+              updated_at = CURRENT_TIMESTAMP,
+              github_url = COALESCE(?, github_url),
+              urgency = CASE
+                WHEN urgency = 'high' OR ? = 'high' THEN 'high'
+                WHEN urgency = 'medium' OR ? = 'medium' THEN 'medium'
+                ELSE 'low' END
+        WHERE id = ?`
+    ).run(
+      shouldAdvance ? 1 : 0,
+      input.channelId,
+      shouldAdvance ? 1 : 0,
+      input.messageId,
+      shouldAdvance ? 1 : 0,
+      input.messageUrl,
+      shouldAdvance ? 1 : 0,
+      input.authorId,
+      shouldAdvance ? 1 : 0,
+      input.authorName,
+      shouldAdvance ? 1 : 0,
+      preview(input.content),
+      shouldAdvance ? 1 : 0,
+      input.summary,
+      shouldAdvance ? 1 : 0,
+      category,
+      shouldAdvance ? 1 : 0,
+      input.createdAt,
+      shouldAdvance ? 1 : 0,
+      input.scanId,
+      githubUrl,
+      input.urgency,
+      input.urgency,
+      duplicate.id
+    );
     return { itemId: duplicate.id, isNew: false };
   }
 
@@ -855,18 +911,31 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
   const categoryColors = new Map(
     listCategories(guildId).map((category) => [category.name, category.color] as const)
   );
-  const relatedByItemId = new Map<number, Array<{ channel_id: string; source_message_created_at: string | null; created_at: string; content_preview: string | null }>>();
+  const relatedByItemId = new Map<number, Array<{
+    channel_id: string;
+    message_id: string;
+    message_url: string;
+    author_id: string;
+    author_name: string;
+    source_message_created_at: string | null;
+    created_at: string;
+    content_preview: string | null;
+  }>>();
 
   if (itemIds.length > 0) {
     const placeholders = itemIds.map(() => "?").join(", ");
     const relatedRows = db.query(
-      `SELECT item_id, channel_id, source_message_created_at, created_at, content_preview
+      `SELECT item_id, channel_id, message_id, message_url, author_id, author_name, source_message_created_at, created_at, content_preview
          FROM item_messages
         WHERE item_id IN (${placeholders})
         ORDER BY item_id ASC, COALESCE(source_message_created_at, created_at) ASC`
     ).all(...itemIds) as Array<{
       item_id: number;
       channel_id: string;
+      message_id: string;
+      message_url: string;
+      author_id: string;
+      author_name: string;
       source_message_created_at: string | null;
       created_at: string;
       content_preview: string | null;
@@ -886,11 +955,24 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
     const item = rowToItem(raw);
     const related = relatedByItemId.get(item.id) ?? [];
     const firstReportedAt = related[0]?.source_message_created_at ?? related[0]?.created_at ?? item.source_message_created_at ?? item.created_at;
-    const relatedPreviews = related
-      .map((row) => row.content_preview)
-      .filter((value): value is string => Boolean(value));
-    const candidatePreviews = relatedPreviews.length > 0 ? relatedPreviews : [item.content_preview];
-    let bestPreview = candidatePreviews.find((text) => !isWeakFollowUpText(text)) ?? candidatePreviews[0] ?? item.content_preview;
+    const displaySource = related
+      .slice()
+      .sort((left, right) => {
+        const leftTime = left.source_message_created_at ?? left.created_at;
+        const rightTime = right.source_message_created_at ?? right.created_at;
+        return rightTime.localeCompare(leftTime);
+      })
+      .find((row) => row.content_preview && isIssueSignalText(row.content_preview))
+      ?? related
+        .slice()
+        .sort((left, right) => {
+          const leftTime = left.source_message_created_at ?? left.created_at;
+          const rightTime = right.source_message_created_at ?? right.created_at;
+          return rightTime.localeCompare(leftTime);
+        })
+        .find((row) => row.content_preview && !isWeakFollowUpText(row.content_preview))
+      ?? null;
+    let bestPreview = displaySource?.content_preview ?? item.content_preview;
     if (bestPreview) {
       bestPreview = bestPreview.replace(/\s+/g, " ").trim();
     }
@@ -900,6 +982,11 @@ function hydrateRenderedItems(guildId: string, rows: Record<string, unknown>[]):
     const projectName = extractProjectName(projectNameSource);
     return {
       ...item,
+      channel_id: displaySource?.channel_id ?? item.channel_id,
+      message_id: displaySource?.message_id ?? item.message_id,
+      message_url: displaySource?.message_url ?? item.message_url,
+      author_id: displaySource?.author_id ?? item.author_id,
+      author_name: displaySource?.author_name ?? item.author_name,
       content_preview: bestPreview ?? item.content_preview,
       relatedCount: Math.max(0, related.length - 1),
       relatedChannels: Array.from(new Set(related.map((row) => row.channel_id))),

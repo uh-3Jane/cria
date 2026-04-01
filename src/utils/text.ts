@@ -191,6 +191,68 @@ export function isWeakFollowUpText(text: string): boolean {
   return false;
 }
 
+export function isIssueSignalText(text: string): boolean {
+  const normalized = text
+    .toLowerCase()
+    .replace(/^<@!?\d+>\s*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized || isWeakFollowUpText(normalized)) {
+    return false;
+  }
+
+  if (normalized.includes("?")) {
+    return true;
+  }
+
+  const starters = [
+    "how ",
+    "what ",
+    "why ",
+    "when ",
+    "where ",
+    "can ",
+    "could ",
+    "would ",
+    "should ",
+    "is ",
+    "are ",
+    "does ",
+    "do ",
+    "any "
+  ];
+  if (starters.some((starter) => normalized.startsWith(starter))) {
+    return true;
+  }
+
+  const issueSignals = [
+    "still",
+    "not ",
+    "isn't",
+    "isnt",
+    "doesn't",
+    "doesnt",
+    "didn't",
+    "didnt",
+    "wrong",
+    "missing",
+    "issue",
+    "problem",
+    "waiting",
+    "update",
+    "help",
+    "merged but",
+    "not live",
+    "not showing",
+    "not reflected",
+    "not on the frontend",
+    "no progress"
+  ];
+
+  return issueSignals.some((signal) => normalized.includes(signal));
+}
+
 export function isLowSignalHelpMessage(text: string): boolean {
   if (extractGithubUrl(text) || extractDefillamaEntityUrl(text) || extractProjectName(text)) {
     return false;
