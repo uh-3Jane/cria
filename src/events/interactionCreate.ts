@@ -11,11 +11,20 @@ import {
 import { assertAdmin } from "../access";
 import { handleAdmin, handleCategory, handleConfig, handleCria, handleIssue, handleIssuesCommand, handleReopen, handleSimpleList, handleUnsnooze } from "../commands/issues";
 import { runScan } from "../commands/scan";
-import { assignItem, getActiveCategoryNames, getItem, getItems, recategorizeItem, resolveItem, reopenItem, snoozeItem, unsnoozeItem } from "../issues/store";
+import { assignItem, getActiveCategoryNames, getItem, getItems, markItemFalsePositive, recategorizeItem, resolveItem, reopenItem, snoozeItem, unsnoozeItem } from "../issues/store";
 import { getDigestSession, itemCardPayload, renderIssuePage, replaceSessionCards, setDigestPage, summaryMessagePayload } from "../issues/digest";
 import { logDebug, logError } from "../utils/logger";
 
 const LLAMA_ROLE_NAME = "llama";
+
+function isLlamaRoleName(name: string): boolean {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .includes(LLAMA_ROLE_NAME);
+}
 
 async function handleCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   switch (interaction.commandName) {
@@ -51,11 +60,12 @@ function parseCustomId(customId: string): string[] {
 }
 
 async function listLlamaOptions(guild: Guild): Promise<Array<{ label: string; value: string; description?: string }>> {
-  const llamaRole = guild.roles.cache.find((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME)
-    ?? (await guild.roles.fetch().then(() => guild.roles.cache.find((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME)));
+  const llamaRole = guild.roles.cache.find((role) => isLlamaRoleName(role.name))
+    ?? (await guild.roles.fetch().then(() => guild.roles.cache.find((role) => isLlamaRoleName(role.name))));
   if (!llamaRole) {
     return [];
   }
+
   const members = await guild.members.fetch();
   return members
     .filter((member) => !member.user.bot)
@@ -221,6 +231,12 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
     await refreshItemCard(interaction, itemId);
     return;
   }
+  if (action === "falsepositive") {
+    logDebug("interaction.button.false_positive", { itemId, guildId: interaction.guildId, userId: interaction.user.id, interactionMessageId: interaction.message.id });
+    markItemFalsePositive(itemId, interaction.guildId, interaction.user.id, interaction.user.username);
+    await refreshItemCard(interaction, itemId);
+    return;
+  }
   if (action === "reopen") {
     logDebug("interaction.button.reopen", { itemId, guildId: interaction.guildId, userId: interaction.user.id, interactionMessageId: interaction.message.id });
     reopenItem(itemId, interaction.guildId, interaction.user.id, interaction.user.username);
@@ -357,7 +373,7 @@ export function registerInteractionHandler(client: Client): void {
           }
           const selectedUserId = interaction.values[0];
           const member = interaction.guild ? await interaction.guild.members.fetch(selectedUserId).catch(() => null) : null;
-          if (!member || !member.roles.cache.some((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME)) {
+          if (!member || !member.roles.cache.some((role) => isLlamaRoleName(role.name))) {
             await interaction.update({ content: "that member is not a llama in this server.", components: [] });
             return;
           }

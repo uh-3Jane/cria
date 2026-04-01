@@ -1,6 +1,7 @@
 import { db } from "../db/client";
 import { findKnowledgeMatches } from "../knowledge/store";
 import { completeJson } from "../llm/client";
+import { findValidatedTraceMatches } from "../traces/store";
 import type {
   BenchmarkCaseRow,
   BenchmarkOutcomeType,
@@ -23,6 +24,7 @@ interface UpsertReviewQueueFromFeedbackInput {
   sourceDomain: LearningFeedbackDomain;
   sourceId: number;
   itemId?: number | null;
+  traceId?: number | null;
   sourceMessageId?: string | null;
   relatedMessageId?: string | null;
   rawInput: string;
@@ -84,6 +86,7 @@ function rowToReviewQueue(row: Record<string, unknown>): ReviewQueueRow {
     source_domain: requiredString("source_domain") as LearningFeedbackDomain,
     source_id: typeof row.source_id === "number" ? row.source_id : null,
     item_id: typeof row.item_id === "number" ? row.item_id : null,
+    trace_id: typeof row.trace_id === "number" ? row.trace_id : null,
     source_message_id: optionalString("source_message_id"),
     related_message_id: optionalString("related_message_id"),
     raw_input: requiredString("raw_input"),
@@ -127,6 +130,7 @@ function rowToBenchmarkCase(row: Record<string, unknown>): BenchmarkCaseRow {
     id: requiredNumber("id"),
     guild_id: requiredString("guild_id"),
     source_review_id: typeof row.source_review_id === "number" ? row.source_review_id : null,
+    trace_id: typeof row.trace_id === "number" ? row.trace_id : null,
     source: requiredString("source") as BenchmarkSource,
     family: requiredString("family"),
     outcome_type: requiredString("outcome_type") as BenchmarkOutcomeType,
@@ -209,6 +213,7 @@ export function upsertReviewQueueFromLearningFeedback(input: UpsertReviewQueueFr
       source_domain,
       source_id,
       item_id,
+      trace_id,
       source_message_id,
       related_message_id,
       raw_input,
@@ -221,9 +226,10 @@ export function upsertReviewQueueFromLearningFeedback(input: UpsertReviewQueueFr
       priority,
       review_status,
       promotion_status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'not_promoted')
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'not_promoted')
     ON CONFLICT(guild_id, source_domain, source_id) DO UPDATE SET
       item_id = COALESCE(excluded.item_id, review_queue.item_id),
+      trace_id = COALESCE(excluded.trace_id, review_queue.trace_id),
       source_message_id = COALESCE(excluded.source_message_id, review_queue.source_message_id),
       related_message_id = COALESCE(excluded.related_message_id, review_queue.related_message_id),
       raw_input = excluded.raw_input,
@@ -240,6 +246,7 @@ export function upsertReviewQueueFromLearningFeedback(input: UpsertReviewQueueFr
     input.sourceDomain,
     input.sourceId,
     input.itemId ?? null,
+    input.traceId ?? null,
     input.sourceMessageId ?? null,
     input.relatedMessageId ?? null,
     preview(input.rawInput, 1_000),
@@ -275,6 +282,7 @@ export function syncReviewQueueFromLearningFeedback(guildId?: string): number {
       sourceDomain: row.domain as LearningFeedbackDomain,
       sourceId: row.id as number,
       itemId: typeof row.item_id === "number" ? row.item_id : null,
+      traceId: typeof row.trace_id === "number" ? row.trace_id : null,
       sourceMessageId: typeof row.source_message_id === "string" ? row.source_message_id : null,
       relatedMessageId: typeof row.related_message_id === "string" ? row.related_message_id : null,
       rawInput: row.input_text as string,
@@ -412,6 +420,15 @@ export function findTrustedValidatedAnswerMatches(args: {
   domains?: LearningFeedbackDomain[];
   limit?: number;
 }): TrustedValidatedAnswerMatch[] {
+  const validatedMatches = findValidatedTraceMatches({
+    guildId: args.guildId,
+    query: args.query,
+    limit: args.limit
+  });
+  if (validatedMatches.length > 0) {
+    return validatedMatches;
+  }
+
   const rows = db.query(
     `SELECT *
        FROM learning_feedback
@@ -472,6 +489,7 @@ export function findTrustedValidatedAnswerMatches(args: {
       score -= correctionCount * 5;
       return {
         id: row.id,
+        traceId: null,
         domain: row.domain,
         inputText: row.input_text,
         contextText: row.context_text,

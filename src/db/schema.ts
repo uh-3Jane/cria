@@ -251,6 +251,7 @@ export function migrate(): void {
       weight INTEGER NOT NULL DEFAULT 0,
       reinforcement_count INTEGER NOT NULL DEFAULT 1,
       item_id INTEGER REFERENCES items(id),
+      trace_id INTEGER REFERENCES conversation_traces(id),
       source_message_id TEXT,
       related_message_id TEXT,
       feedback_fingerprint TEXT NOT NULL,
@@ -259,12 +260,92 @@ export function migrate(): void {
       UNIQUE(guild_id, feedback_fingerprint)
     );
 
+    CREATE TABLE IF NOT EXISTS conversation_traces (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      primary_channel_id TEXT NOT NULL,
+      primary_message_id TEXT NOT NULL,
+      primary_issue_message_id TEXT,
+      strongest_answer_message_id TEXT,
+      trace_fingerprint TEXT NOT NULL,
+      trace_kind TEXT NOT NULL DEFAULT 'unclear',
+      trace_state TEXT NOT NULL DEFAULT 'unclear',
+      trace_category TEXT NOT NULL DEFAULT 'general',
+      urgency TEXT NOT NULL DEFAULT 'low',
+      confidence TEXT NOT NULL DEFAULT 'low',
+      reason_tags TEXT,
+      analysis_version TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'scan',
+      source_item_id INTEGER REFERENCES items(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(guild_id, trace_fingerprint, analysis_version)
+    );
+
+    CREATE TABLE IF NOT EXISTS trace_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trace_id INTEGER NOT NULL REFERENCES conversation_traces(id),
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      reference_message_id TEXT,
+      author_id TEXT NOT NULL,
+      author_name TEXT NOT NULL,
+      content_preview TEXT,
+      message_role TEXT NOT NULL DEFAULT 'other',
+      position_index INTEGER NOT NULL DEFAULT 0,
+      source_message_created_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(trace_id, message_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS trace_analysis_cache (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      trace_fingerprint TEXT NOT NULL,
+      analysis_version TEXT NOT NULL,
+      trace_kind TEXT NOT NULL,
+      trace_state TEXT NOT NULL,
+      category TEXT NOT NULL,
+      urgency TEXT NOT NULL,
+      confidence TEXT NOT NULL,
+      primary_issue_message_id TEXT,
+      strongest_answer_message_id TEXT,
+      reason_tags TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(guild_id, trace_fingerprint, analysis_version)
+    );
+
+    CREATE TABLE IF NOT EXISTS validated_trace_memory (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      trace_id INTEGER REFERENCES conversation_traces(id),
+      item_id INTEGER REFERENCES items(id),
+      outcome_label TEXT NOT NULL,
+      trace_state TEXT NOT NULL,
+      category TEXT NOT NULL,
+      primary_issue_text TEXT NOT NULL,
+      strongest_answer_text TEXT,
+      context_text TEXT,
+      confidence TEXT NOT NULL DEFAULT 'low',
+      weight INTEGER NOT NULL DEFAULT 0,
+      reinforcement_count INTEGER NOT NULL DEFAULT 1,
+      memory_fingerprint TEXT NOT NULL,
+      source_message_id TEXT,
+      related_message_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(guild_id, memory_fingerprint)
+    );
+
     CREATE TABLE IF NOT EXISTS review_queue (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       guild_id TEXT NOT NULL,
       source_domain TEXT NOT NULL,
       source_id INTEGER,
       item_id INTEGER REFERENCES items(id),
+      trace_id INTEGER REFERENCES conversation_traces(id),
       source_message_id TEXT,
       related_message_id TEXT,
       raw_input TEXT NOT NULL,
@@ -288,6 +369,7 @@ export function migrate(): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       guild_id TEXT NOT NULL,
       source_review_id INTEGER REFERENCES review_queue(id),
+      trace_id INTEGER REFERENCES conversation_traces(id),
       source TEXT NOT NULL DEFAULT 'promoted_trace',
       family TEXT NOT NULL,
       outcome_type TEXT NOT NULL,
@@ -344,6 +426,12 @@ export function migrate(): void {
     CREATE INDEX IF NOT EXISTS idx_knowledge_documents_guild_question ON knowledge_documents(guild_id, question_message_id);
     CREATE INDEX IF NOT EXISTS idx_learning_feedback_guild_updated ON learning_feedback(guild_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_learning_feedback_guild_domain ON learning_feedback(guild_id, domain, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_conversation_traces_guild_updated ON conversation_traces(guild_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_conversation_traces_guild_state ON conversation_traces(guild_id, trace_state, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_trace_messages_trace_position ON trace_messages(trace_id, position_index, source_message_created_at);
+    CREATE INDEX IF NOT EXISTS idx_trace_analysis_cache_guild_fingerprint ON trace_analysis_cache(guild_id, trace_fingerprint, analysis_version);
+    CREATE INDEX IF NOT EXISTS idx_validated_trace_memory_guild_updated ON validated_trace_memory(guild_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_validated_trace_memory_guild_outcome ON validated_trace_memory(guild_id, outcome_label, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_review_queue_guild_status ON review_queue(guild_id, review_status, priority DESC, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_review_queue_guild_domain ON review_queue(guild_id, source_domain, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_benchmark_cases_guild_status ON benchmark_cases(guild_id, status, updated_at DESC);
@@ -398,6 +486,12 @@ export function migrate(): void {
   }
   if (!hasColumn("items", "linked_llama_reply_at")) {
     db.exec(`ALTER TABLE items ADD COLUMN linked_llama_reply_at DATETIME;`);
+  }
+  if (!hasColumn("items", "conversation_trace_id")) {
+    db.exec(`ALTER TABLE items ADD COLUMN conversation_trace_id INTEGER REFERENCES conversation_traces(id);`);
+  }
+  if (!hasColumn("items", "outcome_label")) {
+    db.exec(`ALTER TABLE items ADD COLUMN outcome_label TEXT;`);
   }
   if (!hasColumn("scans", "messages_fetched")) {
     db.exec(`ALTER TABLE scans ADD COLUMN messages_fetched INTEGER NOT NULL DEFAULT 0;`);
@@ -487,6 +581,15 @@ export function migrate(): void {
 
   if (!hasColumn("item_messages", "evidence_kind")) {
     db.exec(`ALTER TABLE item_messages ADD COLUMN evidence_kind TEXT NOT NULL DEFAULT 'issue';`);
+  }
+  if (!hasColumn("learning_feedback", "trace_id")) {
+    db.exec(`ALTER TABLE learning_feedback ADD COLUMN trace_id INTEGER REFERENCES conversation_traces(id);`);
+  }
+  if (!hasColumn("review_queue", "trace_id")) {
+    db.exec(`ALTER TABLE review_queue ADD COLUMN trace_id INTEGER REFERENCES conversation_traces(id);`);
+  }
+  if (!hasColumn("benchmark_cases", "trace_id")) {
+    db.exec(`ALTER TABLE benchmark_cases ADD COLUMN trace_id INTEGER REFERENCES conversation_traces(id);`);
   }
 
   const itemMessageRows = db

@@ -364,6 +364,7 @@ export function itemCardPayload(item: RenderedItem, guild: Guild | null): {
     buttons.push(
       new ButtonBuilder().setCustomId(`assign:${item.id}`).setLabel(item.assignee_id ? "reassign" : "assign").setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId(`resolve:${item.id}`).setLabel("resolve").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`falsepositive:${item.id}`).setLabel("not issue").setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId(`category:${item.id}`).setLabel("category").setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`snooze:${item.id}`).setLabel("snooze").setStyle(ButtonStyle.Secondary)
     );

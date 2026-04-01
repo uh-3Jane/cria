@@ -32,6 +32,15 @@ const CHAT_TRAINING_DOCS_PATH = resolve(process.cwd(), "docs/chat_training_docs.
 const CHAT_TRAINING_EXAMPLES_PATH = resolve(process.cwd(), "docs/chat_training_examples.md");
 const CHAT_TRAINING_EXPORT_PATH = resolve(process.cwd(), "docs/chat_training_export.md");
 const LLAMA_ROLE_NAME = "llama";
+
+function isLlamaRoleName(name: string): boolean {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .includes(LLAMA_ROLE_NAME);
+}
 const CHAT_KNOWLEDGE_MATCH_LIMIT = 3;
 const CHAT_FAQ_MATCH_LIMIT = 3;
 const CHAT_EXAMPLE_MATCH_LIMIT = 2;
@@ -458,7 +467,7 @@ async function hasLlamaRole(message: Message): Promise<boolean> {
   if (!member) {
     return false;
   }
-  return member.roles.cache.some((role) => role.name.toLowerCase() === LLAMA_ROLE_NAME);
+  return member.roles.cache.some((role) => isLlamaRoleName(role.name));
 }
 
 function buildKnowledgeContext(message: Message, chain: Message[]): string | null {

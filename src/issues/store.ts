@@ -2,6 +2,7 @@ import { db } from "../db/client";
 import { writeAuditLog } from "../db/audit";
 import { reinforceKnowledgeFromResolvedMessages, relaxKnowledgeFromReopenedMessages } from "../knowledge/store";
 import { recordLearningFeedback } from "../learning/store";
+import { recordValidatedTraceOutcome } from "../traces/store";
 import type {
   ChatClassification,
   ChatConfidence,
@@ -17,6 +18,7 @@ import type {
   RenderedItem,
   ScannedMessageRow,
   ScanSummary,
+  TraceOutcomeLabel,
   Urgency
 } from "../types";
 import { logError } from "../utils/logger";
@@ -168,6 +170,8 @@ function rowToItem(row: Record<string, unknown>): ItemRow {
     linked_llama_reply_author_name: optionalString("linked_llama_reply_author_name"),
     linked_llama_reply_text: optionalString("linked_llama_reply_text"),
     linked_llama_reply_at: optionalString("linked_llama_reply_at"),
+    conversation_trace_id: typeof row.conversation_trace_id === "number" ? row.conversation_trace_id : null,
+    outcome_label: optionalString("outcome_label") as TraceOutcomeLabel | null,
     scan_id: typeof row.scan_id === "number" ? row.scan_id : null
   };
 }
@@ -1149,15 +1153,16 @@ export function getOpenItemsInLookback(guildId: string, lookbackHours: number): 
     `SELECT items.*
        FROM items
        LEFT JOIN (
-         SELECT item_id, MIN(COALESCE(source_message_created_at, created_at)) AS first_reported_at
+         SELECT item_id, MAX(COALESCE(source_message_created_at, created_at)) AS latest_issue_at
            FROM item_messages
+          WHERE evidence_kind = 'issue'
           GROUP BY item_id
        ) related ON related.item_id = items.id
       WHERE items.guild_id = ?
         AND items.status = 'open'
         AND COALESCE(items.trace_state, 'open') != 'resolved_by_trace'
-        AND datetime(COALESCE(related.first_reported_at, items.source_message_created_at, items.created_at)) >= datetime('now', ?)
-      ORDER BY datetime(COALESCE(related.first_reported_at, items.source_message_created_at, items.created_at)) ASC, items.id ASC`
+        AND datetime(COALESCE(related.latest_issue_at, items.source_message_created_at, items.created_at)) >= datetime('now', ?)
+      ORDER BY datetime(COALESCE(related.latest_issue_at, items.source_message_created_at, items.created_at)) ASC, items.id ASC`
   ).all(guildId, `-${lookbackHours} hours`) as Record<string, unknown>[];
 
   return hydrateRenderedItems(guildId, rows).sort((left, right) => {
@@ -1253,6 +1258,7 @@ export function linkLatestLlamaReplyToOpenItems(args: {
 export function updateItemTraceState(args: {
   itemId: number;
   guildId: string;
+  traceId?: number | null;
   traceState: ItemRow["trace_state"];
   confidence: ItemRow["trace_state_confidence"];
   answerMessageId?: string | null;
@@ -1266,6 +1272,7 @@ export function updateItemTraceState(args: {
     `UPDATE items
         SET trace_state = ?,
             trace_state_confidence = ?,
+            conversation_trace_id = COALESCE(?, conversation_trace_id),
             trace_answer_message_id = ?,
             trace_answer_author_id = ?,
             trace_answer_author_name = ?,
@@ -1277,6 +1284,7 @@ export function updateItemTraceState(args: {
   ).run(
     args.traceState,
     args.confidence,
+    args.traceId ?? null,
     args.answerMessageId ?? null,
     args.answerAuthorId ?? null,
     args.answerAuthorName ?? null,
@@ -1346,15 +1354,50 @@ function buildItemLearningPayload(itemId: number, guildId: string): {
   return { item, inputText, contextText, relatedMessageIds };
 }
 
+function recordValidatedOutcomeForLearning(args: {
+  guildId: string;
+  itemId: number;
+  learning: NonNullable<ReturnType<typeof buildItemLearningPayload>>;
+  outcomeLabel: TraceOutcomeLabel;
+  weight: number;
+}): void {
+  recordValidatedTraceOutcome({
+    guildId: args.guildId,
+    traceId: args.learning.item.conversation_trace_id,
+    itemId: args.itemId,
+    outcomeLabel: args.outcomeLabel,
+    traceState: args.learning.item.trace_state,
+    category: args.learning.item.category,
+    primaryIssueText: args.learning.inputText,
+    strongestAnswerText:
+      args.learning.item.trace_answer_text
+      ?? args.learning.item.linked_llama_reply_text
+      ?? args.learning.item.last_human_reply_text
+      ?? null,
+    contextText: args.learning.contextText,
+    confidence: args.learning.item.trace_state_confidence,
+    weight: args.weight,
+    sourceMessageId: args.learning.relatedMessageIds[0] ?? args.learning.item.message_id,
+    relatedMessageId: args.learning.item.message_id
+  });
+}
+
 export function assignItem(itemId: number, guildId: string, userId: string, userName: string, actorId: string, actorName: string): void {
   const learning = buildItemLearningPayload(itemId, guildId);
-  db.query(`UPDATE items SET assignee_id = ?, assignee_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND guild_id = ?`).run(
+  db.query(`UPDATE items SET assignee_id = ?, assignee_name = ?, outcome_label = 'assigned', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND guild_id = ?`).run(
     userId,
     userName,
     itemId,
     guildId
   );
   if (learning) {
+    recordValidatedOutcomeForLearning({
+      guildId,
+      itemId,
+      learning,
+      outcomeLabel: "assigned",
+      weight: 6
+    });
     try {
       recordLearningFeedback({
         guildId,
@@ -1366,6 +1409,7 @@ export function assignItem(itemId: number, guildId: string, userId: string, user
         feedbackKind: "refined",
         weight: 6,
         itemId,
+        traceId: learning.item.conversation_trace_id,
         sourceMessageId: learning.relatedMessageIds[0] ?? learning.item.message_id,
         relatedMessageId: learning.item.message_id
       });
@@ -1390,9 +1434,19 @@ export function recategorizeItem(itemId: number, guildId: string, categoryName: 
         SET category = ?,
             assignee_id = ?,
             assignee_name = ?,
+            outcome_label = 'categorized',
             updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND guild_id = ?`
   ).run(category, defaultAssignee.userId ?? null, defaultAssignee.userName ?? null, itemId, guildId);
+  if (learning) {
+    recordValidatedOutcomeForLearning({
+      guildId,
+      itemId,
+      learning,
+      outcomeLabel: "categorized",
+      weight: item.category === category ? 5 : 8
+    });
+  }
   try {
     recordLearningFeedback({
       guildId,
@@ -1404,6 +1458,7 @@ export function recategorizeItem(itemId: number, guildId: string, categoryName: 
       feedbackKind: item.category === category ? "confirmed" : "corrected",
       weight: item.category === category ? 5 : 8,
       itemId,
+      traceId: learning?.item.conversation_trace_id ?? item.conversation_trace_id,
       sourceMessageId: learning?.relatedMessageIds[0] ?? item.message_id,
       relatedMessageId: item.message_id
     });
@@ -1419,6 +1474,7 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
   db.query(
     `UPDATE items
         SET status = 'resolved',
+            outcome_label = 'resolved',
             resolved_at = CURRENT_TIMESTAMP,
             resolved_by = ?,
             updated_at = CURRENT_TIMESTAMP
@@ -1431,6 +1487,13 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   reinforceKnowledgeFromResolvedMessages(guildId, relatedMessageIds);
   if (learning) {
+    recordValidatedOutcomeForLearning({
+      guildId,
+      itemId,
+      learning,
+      outcomeLabel: "resolved",
+      weight: 9
+    });
     const resolutionSummary = learning.item.trace_answer_text
       ? learning.item.trace_answer_text
       : learning.item.linked_llama_reply_text
@@ -1449,6 +1512,7 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
         feedbackKind: "confirmed",
         weight: 9,
         itemId,
+        traceId: learning.item.conversation_trace_id,
         sourceMessageId: relatedMessageIds[0] ?? learning.item.message_id,
         relatedMessageId: learning.item.message_id
       });
@@ -1464,6 +1528,7 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
   db.query(
     `UPDATE items
         SET status = 'open',
+            outcome_label = 'reopened',
             resolved_at = NULL,
             resolved_by = NULL,
             updated_at = CURRENT_TIMESTAMP
@@ -1476,6 +1541,13 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   relaxKnowledgeFromReopenedMessages(guildId, relatedMessageIds);
   if (learning) {
+    recordValidatedOutcomeForLearning({
+      guildId,
+      itemId,
+      learning,
+      outcomeLabel: "reopened",
+      weight: 9
+    });
     const reopenInitial = learning.item.trace_answer_text ?? learning.item.linked_llama_reply_text ?? "resolved";
     try {
       recordLearningFeedback({
@@ -1488,6 +1560,7 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
         feedbackKind: "corrected",
         weight: 9,
         itemId,
+        traceId: learning.item.conversation_trace_id,
         sourceMessageId: relatedMessageIds[0] ?? learning.item.message_id,
         relatedMessageId: learning.item.message_id
       });
@@ -1496,6 +1569,47 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
     }
   }
   writeAuditLog({ guildId, actorId, actorName, action: "reopen", target: String(itemId) });
+}
+
+export function markItemFalsePositive(itemId: number, guildId: string, actorId: string, actorName: string): void {
+  const learning = buildItemLearningPayload(itemId, guildId);
+  db.query(
+    `UPDATE items
+        SET status = 'resolved',
+            outcome_label = 'false_positive',
+            resolved_at = CURRENT_TIMESTAMP,
+            resolved_by = ?,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND guild_id = ?`
+  ).run(actorName, itemId, guildId);
+  if (learning) {
+    recordValidatedOutcomeForLearning({
+      guildId,
+      itemId,
+      learning,
+      outcomeLabel: "false_positive",
+      weight: 9
+    });
+    try {
+      recordLearningFeedback({
+        guildId,
+        domain: "scan_false_positive",
+        inputText: learning.inputText,
+        contextText: learning.contextText,
+        initialOutput: learning.item.summary,
+        correctedOutput: "false_positive",
+        feedbackKind: "corrected",
+        weight: 9,
+        itemId,
+        traceId: learning.item.conversation_trace_id,
+        sourceMessageId: learning.relatedMessageIds[0] ?? learning.item.message_id,
+        relatedMessageId: learning.item.message_id
+      });
+    } catch (error) {
+      logError("issues.false_positive.learning.failed", error, { guildId, itemId });
+    }
+  }
+  writeAuditLog({ guildId, actorId, actorName, action: "false_positive", target: String(itemId) });
 }
 
 export function snoozeItem(itemId: number, guildId: string, untilIso: string | null, actorId: string, actorName: string): void {

@@ -18,6 +18,7 @@ interface RecordLearningFeedbackInput {
   feedbackKind: LearningFeedbackKind;
   weight?: number;
   itemId?: number | null;
+  traceId?: number | null;
   sourceMessageId?: string | null;
   relatedMessageId?: string | null;
 }
@@ -54,6 +55,7 @@ function rowToLearningFeedback(row: Record<string, unknown>): LearningFeedbackRo
     weight: requiredNumber("weight"),
     reinforcement_count: requiredNumber("reinforcement_count"),
     item_id: typeof row.item_id === "number" ? row.item_id : null,
+    trace_id: typeof row.trace_id === "number" ? row.trace_id : null,
     source_message_id: optionalString("source_message_id"),
     related_message_id: optionalString("related_message_id"),
     feedback_fingerprint: requiredString("feedback_fingerprint"),
@@ -86,10 +88,11 @@ export function recordLearningFeedback(input: RecordLearningFeedbackInput): numb
       weight,
       reinforcement_count,
       item_id,
+      trace_id,
       source_message_id,
       related_message_id,
       feedback_fingerprint
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
     ON CONFLICT(guild_id, feedback_fingerprint) DO UPDATE SET
       context_text = COALESCE(excluded.context_text, learning_feedback.context_text),
       initial_output = COALESCE(excluded.initial_output, learning_feedback.initial_output),
@@ -98,6 +101,7 @@ export function recordLearningFeedback(input: RecordLearningFeedbackInput): numb
       weight = MAX(learning_feedback.weight, excluded.weight),
       reinforcement_count = learning_feedback.reinforcement_count + 1,
       item_id = COALESCE(excluded.item_id, learning_feedback.item_id),
+      trace_id = COALESCE(excluded.trace_id, learning_feedback.trace_id),
       source_message_id = COALESCE(excluded.source_message_id, learning_feedback.source_message_id),
       related_message_id = COALESCE(excluded.related_message_id, learning_feedback.related_message_id),
       updated_at = CURRENT_TIMESTAMP`
@@ -111,6 +115,7 @@ export function recordLearningFeedback(input: RecordLearningFeedbackInput): numb
     input.feedbackKind,
     Math.max(0, input.weight ?? 0),
     input.itemId ?? null,
+    input.traceId ?? null,
     input.sourceMessageId ?? null,
     input.relatedMessageId ?? null,
     fingerprint
@@ -131,6 +136,7 @@ export function recordLearningFeedback(input: RecordLearningFeedbackInput): numb
     sourceDomain: input.domain,
     sourceId: row.id,
     itemId: input.itemId ?? null,
+    traceId: input.traceId ?? null,
     sourceMessageId: input.sourceMessageId ?? null,
     relatedMessageId: input.relatedMessageId ?? null,
     rawInput: normalizedInput,

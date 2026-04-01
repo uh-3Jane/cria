@@ -2,6 +2,8 @@ export type ItemStatus = "open" | "resolved" | "snoozed";
 export type Urgency = "high" | "medium" | "low";
 export type TraceState = "open" | "likely_handled" | "resolved_by_trace" | "unclear";
 export type TraceStateConfidence = "low" | "medium" | "high";
+export type TraceKind = "actionable" | "non_actionable" | "unclear";
+export type TraceOutcomeLabel = "resolved" | "reopened" | "false_positive" | "categorized" | "assigned";
 export type ItemMessageRole = "user" | "llama" | "team" | "other";
 export type ItemMessageKind = "issue" | "evidence";
 export type ChatClassification =
@@ -13,7 +15,7 @@ export type ChatClassification =
   | "out_of_scope"
   | "needs_clarification";
 export type ChatConfidence = "high" | "medium" | "low";
-export type LearningFeedbackDomain = "chat_answer" | "scan_category" | "scan_resolution" | "scan_assignment";
+export type LearningFeedbackDomain = "chat_answer" | "scan_category" | "scan_resolution" | "scan_assignment" | "scan_false_positive";
 export type LearningFeedbackKind = "confirmed" | "refined" | "corrected";
 export type ReviewStatus = "pending" | "reviewed_good" | "reviewed_corrected" | "discarded" | "stale";
 export type ReviewPromotionStatus = "not_promoted" | "promoted" | "retired";
@@ -125,6 +127,8 @@ export interface ItemRow {
   linked_llama_reply_author_name: string | null;
   linked_llama_reply_text: string | null;
   linked_llama_reply_at: string | null;
+  conversation_trace_id: number | null;
+  outcome_label: TraceOutcomeLabel | null;
   scan_id: number | null;
 }
 
@@ -304,6 +308,7 @@ export interface LearningFeedbackRow {
   weight: number;
   reinforcement_count: number;
   item_id: number | null;
+  trace_id: number | null;
   source_message_id: string | null;
   related_message_id: string | null;
   feedback_fingerprint: string;
@@ -330,6 +335,7 @@ export interface ReviewQueueRow {
   source_domain: LearningFeedbackDomain;
   source_id: number | null;
   item_id: number | null;
+  trace_id: number | null;
   source_message_id: string | null;
   related_message_id: string | null;
   raw_input: string;
@@ -365,11 +371,12 @@ export interface ReviewedPrecedentMatch {
 
 export interface TrustedValidatedAnswerMatch {
   id: number;
-  domain: LearningFeedbackDomain;
+  traceId: number | null;
+  domain: LearningFeedbackDomain | "validated_trace";
   inputText: string;
   contextText: string | null;
   answerText: string;
-  feedbackKind: LearningFeedbackKind;
+  feedbackKind: LearningFeedbackKind | "validated";
   weight: number;
   reinforcementCount: number;
   confirmationCount: number;
@@ -381,6 +388,7 @@ export interface BenchmarkCaseRow {
   id: number;
   guild_id: string;
   source_review_id: number | null;
+  trace_id: number | null;
   source: BenchmarkSource;
   family: string;
   outcome_type: BenchmarkOutcomeType;
@@ -418,4 +426,79 @@ export interface BenchmarkRunResultRow {
   score: number;
   notes: string | null;
   created_at: string;
+}
+
+export interface ConversationTraceRow {
+  id: number;
+  guild_id: string;
+  primary_channel_id: string;
+  primary_message_id: string;
+  primary_issue_message_id: string | null;
+  strongest_answer_message_id: string | null;
+  trace_fingerprint: string;
+  trace_kind: TraceKind;
+  trace_state: TraceState;
+  trace_category: Category;
+  urgency: Urgency;
+  confidence: TraceStateConfidence;
+  reason_tags: string | null;
+  analysis_version: string;
+  source: "scan" | "chat";
+  source_item_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TraceMessageRow {
+  id: number;
+  trace_id: number;
+  guild_id: string;
+  channel_id: string;
+  message_id: string;
+  reference_message_id: string | null;
+  author_id: string;
+  author_name: string;
+  content_preview: string | null;
+  message_role: ItemMessageRole;
+  position_index: number;
+  source_message_created_at: string | null;
+  created_at: string;
+}
+
+export interface TraceAnalysisCacheRow {
+  id: number;
+  guild_id: string;
+  trace_fingerprint: string;
+  analysis_version: string;
+  trace_kind: TraceKind;
+  trace_state: TraceState;
+  category: Category;
+  urgency: Urgency;
+  confidence: TraceStateConfidence;
+  primary_issue_message_id: string | null;
+  strongest_answer_message_id: string | null;
+  reason_tags: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ValidatedTraceMemoryRow {
+  id: number;
+  guild_id: string;
+  trace_id: number | null;
+  item_id: number | null;
+  outcome_label: TraceOutcomeLabel;
+  trace_state: TraceState;
+  category: Category;
+  primary_issue_text: string;
+  strongest_answer_text: string | null;
+  context_text: string | null;
+  confidence: TraceStateConfidence;
+  weight: number;
+  reinforcement_count: number;
+  memory_fingerprint: string;
+  source_message_id: string | null;
+  related_message_id: string | null;
+  created_at: string;
+  updated_at: string;
 }
