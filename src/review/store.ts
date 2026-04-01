@@ -12,6 +12,7 @@ import type {
   LearningFeedbackKind,
   ReviewPromotionStatus,
   ReviewedPrecedentMatch,
+  TrustedValidatedAnswerMatch,
   ReviewQueueRow,
   ReviewStatus
 } from "../types";
@@ -403,6 +404,83 @@ export function findReviewedPrecedentMatches(args: {
       reinforcementCount: row.reinforcement_count,
       score
     }));
+}
+
+export function findTrustedValidatedAnswerMatches(args: {
+  guildId: string;
+  query: string;
+  domains?: LearningFeedbackDomain[];
+  limit?: number;
+}): TrustedValidatedAnswerMatch[] {
+  const rows = db.query(
+    `SELECT *
+       FROM learning_feedback
+      WHERE guild_id = ?
+      ORDER BY updated_at DESC
+      LIMIT 400`
+  ).all(args.guildId) as Record<string, unknown>[];
+  const allowed = args.domains ? new Set(args.domains) : null;
+  const parsed = rows
+    .map((row) => ({
+      id: row.id as number,
+      domain: row.domain as LearningFeedbackDomain,
+      input_text: row.input_text as string,
+      context_text: typeof row.context_text === "string" ? row.context_text : null,
+      initial_output: typeof row.initial_output === "string" ? row.initial_output : null,
+      corrected_output: row.corrected_output as string,
+      feedback_kind: row.feedback_kind as LearningFeedbackKind,
+      weight: row.weight as number,
+      reinforcement_count: row.reinforcement_count as number
+    }))
+    .filter((row) => !allowed || allowed.has(row.domain));
+
+  return parsed
+    .filter((row) =>
+      row.domain === "scan_resolution"
+      && row.feedback_kind === "confirmed"
+      && row.corrected_output.trim().length > 0
+      && !row.corrected_output.toLowerCase().startsWith("resolved:")
+      && sharedTokenCount(args.query, row.input_text) >= 2
+    )
+    .map((row) => {
+      const confirmationCount = parsed.filter((candidate) =>
+        candidate.domain === "scan_resolution"
+        && candidate.feedback_kind === "confirmed"
+        && sharedTokenCount(row.corrected_output, candidate.corrected_output) >= 2
+        && sharedTokenCount(args.query, candidate.input_text) >= 2
+      ).length;
+      const correctionCount = parsed.filter((candidate) =>
+        candidate.domain === "scan_resolution"
+        && candidate.feedback_kind === "corrected"
+        && candidate.initial_output
+        && sharedTokenCount(row.corrected_output, candidate.initial_output) >= 2
+        && sharedTokenCount(args.query, candidate.input_text) >= 2
+      ).length;
+      let score = sharedTokenCount(args.query, row.input_text) * 4;
+      score += sharedTokenCount(args.query, row.corrected_output) * 3;
+      if (row.context_text) {
+        score += sharedTokenCount(args.query, row.context_text);
+      }
+      score += row.weight;
+      score += Math.min(confirmationCount * 3, 12);
+      score -= correctionCount * 5;
+      return {
+        id: row.id,
+        domain: row.domain,
+        inputText: row.input_text,
+        contextText: row.context_text,
+        answerText: row.corrected_output,
+        feedbackKind: row.feedback_kind,
+        weight: row.weight,
+        reinforcementCount: row.reinforcement_count,
+        confirmationCount,
+        correctionCount,
+        score
+      };
+    })
+    .filter((entry) => entry.confirmationCount >= 2 && entry.correctionCount < entry.confirmationCount && entry.score >= 8)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, Math.max(1, args.limit ?? 3));
 }
 
 export function createBenchmarkCase(input: CreateBenchmarkCaseInput): number {

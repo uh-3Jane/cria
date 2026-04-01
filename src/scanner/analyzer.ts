@@ -2,7 +2,7 @@ import { config } from "../config";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { findKnowledgeMatches } from "../knowledge/store";
-import { findReviewedPrecedentMatches } from "../review/store";
+import { findReviewedPrecedentMatches, findTrustedValidatedAnswerMatches } from "../review/store";
 import { completeJson } from "../llm/client";
 import type { FetchedMessage, LlmIssueCandidate } from "../types";
 import { logDebug, logError } from "../utils/logger";
@@ -282,6 +282,27 @@ function learningLines(message: FetchedMessage): string {
     .join("\n");
 }
 
+function trustedAnswerLines(message: FetchedMessage): string {
+  const matches = findTrustedValidatedAnswerMatches({
+    guildId: message.guildId,
+    query: message.content,
+    domains: ["scan_resolution"],
+    limit: MAX_PRECEDENTS
+  });
+  if (matches.length === 0) {
+    return "(none)";
+  }
+  return matches
+    .map((match, index) => [
+      `trusted_answer_${index + 1}_input: ${preview(match.inputText, 220)}`,
+      `trusted_answer_${index + 1}_answer: ${preview(match.answerText, 220)}`,
+      `trusted_answer_${index + 1}_confirmations: ${match.confirmationCount}`,
+      `trusted_answer_${index + 1}_corrections: ${match.correctionCount}`,
+      `trusted_answer_${index + 1}_score: ${match.score}`
+    ].join("\n"))
+    .join("\n");
+}
+
 function batchPrompt(messages: FetchedMessage[], compact = false): string {
   const blocks = messages.map((message, index) => {
     const beforeLines = compact ? message.contextBefore.slice(-1) : message.contextBefore;
@@ -300,6 +321,7 @@ function batchPrompt(messages: FetchedMessage[], compact = false): string {
       `signals:\n${featureLines(message).join("\n")}`,
       `similar_llama_cases:\n${precedentLines(message)}`,
       `similar_learning_feedback:\n${learningLines(message)}`,
+      `trusted_validated_answers:\n${trustedAnswerLines(message)}`,
       `before:\n${before}`,
       `after:\n${after}`
     ].join("\n");

@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ChannelType, type Client, type GuildMember, type Message } from "discord.js";
-import { findChatConversation, findChatEngagementByBotReply, isChatEnabled, listChatChannels, recordChatEngagement } from "../issues/store";
+import { findChatConversation, findChatEngagementByBotReply, isChatEnabled, linkLatestLlamaReplyToOpenItems, listChatChannels, recordChatEngagement } from "../issues/store";
 import { findKnowledgeMatches, upsertKnowledgeDocument } from "../knowledge/store";
 import { recordLearningFeedback } from "../learning/store";
 import { completeJson } from "../llm/client";
-import { findReviewedPrecedentMatches } from "../review/store";
+import { findReviewedPrecedentMatches, findTrustedValidatedAnswerMatches } from "../review/store";
 import { enrichGithubUrl } from "../integrations/github";
 import { logDebug, logError } from "../utils/logger";
 import { extractDefillamaEntityUrl, extractGithubUrls, isLowSignalKnowledgeReply, isWeakFollowUpText, preview, sharedTokenCount } from "../utils/text";
@@ -84,6 +84,7 @@ interface ChatGrounding {
   exampleMatches: string[];
   knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string; score: number; feedbackKind: "unreviewed" | "confirmed" | "refined" | "corrected" }>;
   learningMatches: Array<{ domain: string; correctedOutput: string; feedbackKind: SharedLearningFeedbackKind; score: number }>;
+  trustedAnswerMatches: Array<{ answerText: string; confirmationCount: number; correctionCount: number; score: number }>;
   githubSummaries: string[];
 }
 
@@ -302,8 +303,14 @@ function isEscalationQuestion(args: {
     && (match.feedbackKind === "confirmed" || match.feedbackKind === "refined")
     && match.score >= CHAT_LEARNED_PRECEDENT_MIN_SCORE
   );
+  const trustedAnswerMatches = args.grounding.trustedAnswerMatches.filter((match) =>
+    match.confirmationCount >= CHAT_LEARNED_PRECEDENT_MIN_COUNT
+    && match.correctionCount < match.confirmationCount
+    && match.score >= CHAT_LEARNED_PRECEDENT_MIN_SCORE
+  );
   const hasLearnedGoAhead = learnedMatches.length >= CHAT_LEARNED_PRECEDENT_MIN_COUNT
-    || sharedMatches.length >= CHAT_LEARNED_PRECEDENT_MIN_COUNT;
+    || sharedMatches.length >= CHAT_LEARNED_PRECEDENT_MIN_COUNT
+    || trustedAnswerMatches.length > 0;
   return asksQuestion && !hasLearnedGoAhead && (args.message.mentions.users.size > 0 || Boolean(args.defillamaUrl) || combined.length >= 20);
 }
 
@@ -363,6 +370,7 @@ function buildChatPrompt(args: {
   trainingExamples: string | null;
   knowledgeMatches: Array<{ questionText: string; answerText: string; answerAuthorName: string; feedbackKind: LlamaFeedbackKind }>;
   learningMatches: Array<{ domain: string; correctedOutput: string; feedbackKind: SharedLearningFeedbackKind }>;
+  trustedAnswerMatches: Array<{ answerText: string; confirmationCount: number; correctionCount: number; score: number }>;
 }): { system: string; user: string } {
     const system = [
     "You are Cria, a public-facing DefiLlama Discord helper.",
@@ -400,6 +408,9 @@ function buildChatPrompt(args: {
       : null,
     args.learningMatches.length > 0
       ? `Shared learned outcomes from chat and scan: ${args.learningMatches.map((match, index) => `${index + 1}. Domain: ${match.domain}. Judgment: ${match.feedbackKind}. Learned outcome: ${match.correctedOutput}`).join(" ")}`
+      : null,
+    args.trustedAnswerMatches.length > 0
+      ? `Trusted validated answers from resolved llama-handled cases: ${args.trustedAnswerMatches.map((match, index) => `${index + 1}. Answer: ${match.answerText} Confirmations: ${match.confirmationCount}. Corrections: ${match.correctionCount}.`).join(" ")}`
       : null,
     "Use FAQ/doc matches as authoritative only when they clearly fit. Use examples and llama precedents as style/context, not rigid templates.",
     "Return JSON only with keys: classification, reply, needs_clarification, confidence.",
@@ -587,12 +598,24 @@ async function recordLlamaKnowledge(message: Message): Promise<void> {
     relatedBotClassification: botEngagement?.classification ?? null,
     relatedBotConfidence: botEngagement?.confidence ?? null
   });
+  const relatedMessageIds = [question.id, ...chain.map((entry) => entry.id)];
+  const linkedItemIds = linkLatestLlamaReplyToOpenItems({
+    guildId: message.guildId,
+    channelId: message.channelId,
+    replyMessageId: message.id,
+    replyAuthorId: message.author.id,
+    replyAuthorName: message.author.username,
+    replyText: message.content,
+    replyCreatedAt: message.createdAt.toISOString(),
+    relatedMessageIds
+  });
   logDebug("chat.knowledge.recorded", {
     guildId: message.guildId,
     channelId: message.channelId,
     knowledgeId: id,
     questionMessageId: question.id,
     answerMessageId: message.id,
+    linkedItemIds,
     feedbackKind: feedback.kind,
     feedbackScore: feedback.score,
     relatedBotReplyMessageId: botReply?.id ?? null
@@ -652,6 +675,12 @@ async function routeChatReply(
     query: combined,
     limit: CHAT_KNOWLEDGE_MATCH_LIMIT
   });
+  const trustedAnswerMatches = findTrustedValidatedAnswerMatches({
+    guildId: message.guildId!,
+    query: combined,
+    domains: ["scan_resolution"],
+    limit: CHAT_KNOWLEDGE_MATCH_LIMIT
+  });
   const faqMatches = pickRelevantFaqSnippets(trainingDocs, combined);
   const exampleMatches = pickRelevantSections({
     raw: trainingExamplesDoc,
@@ -665,6 +694,12 @@ async function routeChatReply(
     exampleMatches,
     knowledgeMatches: learnedKnowledgeMatches,
     learningMatches,
+    trustedAnswerMatches: trustedAnswerMatches.map((match) => ({
+      answerText: match.answerText,
+      confirmationCount: match.confirmationCount,
+      correctionCount: match.correctionCount,
+      score: match.score
+    })),
     githubSummaries
   };
   if (isEscalationQuestion({
@@ -697,7 +732,8 @@ async function routeChatReply(
     exampleMatches,
     trainingExamples,
     knowledgeMatches: learnedKnowledgeMatches,
-    learningMatches
+    learningMatches,
+    trustedAnswerMatches: grounding.trustedAnswerMatches
   });
 
   const decision = parseChatDecision(await completeJson(prompt.system, prompt.user));

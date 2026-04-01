@@ -51,6 +51,11 @@ export function migrate(): void {
       last_human_reply_user_id TEXT,
       last_human_reply_name TEXT,
       last_human_reply_text TEXT,
+      linked_llama_reply_message_id TEXT,
+      linked_llama_reply_author_id TEXT,
+      linked_llama_reply_author_name TEXT,
+      linked_llama_reply_text TEXT,
+      linked_llama_reply_at DATETIME,
       scan_id INTEGER REFERENCES scans(id)
     );
 
@@ -343,6 +348,21 @@ export function migrate(): void {
   }
   if (!hasColumn("items", "last_human_reply_text")) {
     db.exec(`ALTER TABLE items ADD COLUMN last_human_reply_text TEXT;`);
+  }
+  if (!hasColumn("items", "linked_llama_reply_message_id")) {
+    db.exec(`ALTER TABLE items ADD COLUMN linked_llama_reply_message_id TEXT;`);
+  }
+  if (!hasColumn("items", "linked_llama_reply_author_id")) {
+    db.exec(`ALTER TABLE items ADD COLUMN linked_llama_reply_author_id TEXT;`);
+  }
+  if (!hasColumn("items", "linked_llama_reply_author_name")) {
+    db.exec(`ALTER TABLE items ADD COLUMN linked_llama_reply_author_name TEXT;`);
+  }
+  if (!hasColumn("items", "linked_llama_reply_text")) {
+    db.exec(`ALTER TABLE items ADD COLUMN linked_llama_reply_text TEXT;`);
+  }
+  if (!hasColumn("items", "linked_llama_reply_at")) {
+    db.exec(`ALTER TABLE items ADD COLUMN linked_llama_reply_at DATETIME;`);
   }
   if (!hasColumn("scans", "messages_fetched")) {
     db.exec(`ALTER TABLE scans ADD COLUMN messages_fetched INTEGER NOT NULL DEFAULT 0;`);

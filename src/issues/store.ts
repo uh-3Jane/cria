@@ -155,6 +155,11 @@ function rowToItem(row: Record<string, unknown>): ItemRow {
     last_human_reply_user_id: optionalString("last_human_reply_user_id"),
     last_human_reply_name: optionalString("last_human_reply_name"),
     last_human_reply_text: optionalString("last_human_reply_text"),
+    linked_llama_reply_message_id: optionalString("linked_llama_reply_message_id"),
+    linked_llama_reply_author_id: optionalString("linked_llama_reply_author_id"),
+    linked_llama_reply_author_name: optionalString("linked_llama_reply_author_name"),
+    linked_llama_reply_text: optionalString("linked_llama_reply_text"),
+    linked_llama_reply_at: optionalString("linked_llama_reply_at"),
     scan_id: typeof row.scan_id === "number" ? row.scan_id : null
   };
 }
@@ -978,6 +983,66 @@ export function getItem(itemId: number, guildId: string): ItemRow | null {
   return row ? rowToItem(row) : null;
 }
 
+export function linkLatestLlamaReplyToOpenItems(args: {
+  guildId: string;
+  channelId: string;
+  replyMessageId: string;
+  replyAuthorId: string;
+  replyAuthorName: string;
+  replyText: string;
+  replyCreatedAt: string;
+  relatedMessageIds: string[];
+}): number[] {
+  if (args.relatedMessageIds.length === 0) {
+    return [];
+  }
+
+  const placeholders = args.relatedMessageIds.map(() => "?").join(", ");
+  const rows = db.query(
+    `SELECT DISTINCT items.id
+       FROM item_messages
+       JOIN items ON items.id = item_messages.item_id
+      WHERE items.guild_id = ?
+        AND items.status = 'open'
+        AND items.channel_id = ?
+        AND item_messages.message_id IN (${placeholders})`
+  ).all(args.guildId, args.channelId, ...args.relatedMessageIds) as Array<{ id: number }>;
+
+  const linkedIds: number[] = [];
+  for (const row of rows) {
+    const item = getItem(row.id, args.guildId);
+    if (!item) {
+      continue;
+    }
+    const existingAt = item.linked_llama_reply_at ? Date.parse(item.linked_llama_reply_at) : Number.NEGATIVE_INFINITY;
+    const candidateAt = Date.parse(args.replyCreatedAt);
+    if (Number.isFinite(existingAt) && Number.isFinite(candidateAt) && existingAt > candidateAt) {
+      continue;
+    }
+    db.query(
+      `UPDATE items
+          SET linked_llama_reply_message_id = ?,
+              linked_llama_reply_author_id = ?,
+              linked_llama_reply_author_name = ?,
+              linked_llama_reply_text = ?,
+              linked_llama_reply_at = ?,
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND guild_id = ?`
+    ).run(
+      args.replyMessageId,
+      args.replyAuthorId,
+      args.replyAuthorName,
+      preview(args.replyText, 1_500),
+      args.replyCreatedAt,
+      row.id,
+      args.guildId
+    );
+    linkedIds.push(row.id);
+  }
+
+  return linkedIds;
+}
+
 export function getItemMessages(itemId: number): ItemMessageRow[] {
   return db.query(`SELECT * FROM item_messages WHERE item_id = ? ORDER BY created_at ASC`).all(itemId) as ItemMessageRow[];
 }
@@ -1007,7 +1072,9 @@ function buildItemLearningPayload(itemId: number, guildId: string): {
       `urgency: ${item.urgency}`,
       `author: ${item.author_name}`,
       item.last_human_reply_name ? `last_human_reply_by: ${item.last_human_reply_name}` : null,
-      item.last_human_reply_text ? `last_human_reply_text: ${item.last_human_reply_text}` : null
+      item.last_human_reply_text ? `last_human_reply_text: ${item.last_human_reply_text}` : null,
+      item.linked_llama_reply_author_name ? `linked_llama_reply_by: ${item.linked_llama_reply_author_name}` : null,
+      item.linked_llama_reply_text ? `linked_llama_reply_text: ${item.linked_llama_reply_text}` : null
     ].filter((value): value is string => Boolean(value)).join("\n"),
     1_500
   );
@@ -1103,7 +1170,9 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   reinforceKnowledgeFromResolvedMessages(guildId, relatedMessageIds);
   if (learning) {
-    const resolutionSummary = learning.item.last_human_reply_text
+    const resolutionSummary = learning.item.linked_llama_reply_text
+      ? learning.item.linked_llama_reply_text
+      : learning.item.last_human_reply_text
       ? `resolved after human reply: ${learning.item.last_human_reply_text}`
       : `resolved: ${learning.item.summary}`;
     try {
@@ -1144,17 +1213,15 @@ export function reopenItem(itemId: number, guildId: string, actorId: string, act
   ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
   relaxKnowledgeFromReopenedMessages(guildId, relatedMessageIds);
   if (learning) {
-    const reopenSummary = learning.item.last_human_reply_text
-      ? `reopened after human reply: ${learning.item.last_human_reply_text}`
-      : `reopened: ${learning.item.summary}`;
+    const reopenInitial = learning.item.linked_llama_reply_text ?? "resolved";
     try {
       recordLearningFeedback({
         guildId,
         domain: "scan_resolution",
         inputText: learning.inputText,
         contextText: learning.contextText,
-        initialOutput: "resolved",
-        correctedOutput: reopenSummary,
+        initialOutput: reopenInitial,
+        correctedOutput: "reopened",
         feedbackKind: "corrected",
         weight: 9,
         itemId,

@@ -107,6 +107,11 @@ export interface ItemRow {
   last_human_reply_user_id: string | null;
   last_human_reply_name: string | null;
   last_human_reply_text: string | null;
+  linked_llama_reply_message_id: string | null;
+  linked_llama_reply_author_id: string | null;
+  linked_llama_reply_author_name: string | null;
+  linked_llama_reply_text: string | null;
+  linked_llama_reply_at: string | null;
   scan_id: number | null;
 }
 
@@ -339,6 +344,20 @@ export interface ReviewedPrecedentMatch {
   promotionStatus: ReviewPromotionStatus;
   weight: number;
   reinforcementCount: number;
+  score: number;
+}
+
+export interface TrustedValidatedAnswerMatch {
+  id: number;
+  domain: LearningFeedbackDomain;
+  inputText: string;
+  contextText: string | null;
+  answerText: string;
+  feedbackKind: LearningFeedbackKind;
+  weight: number;
+  reinforcementCount: number;
+  confirmationCount: number;
+  correctionCount: number;
   score: number;
 }
 
