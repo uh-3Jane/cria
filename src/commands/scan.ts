@@ -104,20 +104,6 @@ function extractGithubPullUrl(text: string): URL | null {
   }
 }
 
-function classifyPrOwner(url: URL | null): "rohan" | "ulysses" | null {
-  if (!url) {
-    return null;
-  }
-  const path = url.pathname.toLowerCase();
-  if (path.includes("/defillama-adapters/") || path.includes("/dimension-adapters/")) {
-    return "rohan";
-  }
-  if (path.includes("/sdk/") || path.includes("/defillama-sdk/")) {
-    return "ulysses";
-  }
-  return null;
-}
-
 function isPrFollowUpMessage(text: string): boolean {
   const lower = text.toLowerCase();
   if (!extractGithubPullUrl(lower)) {
@@ -136,42 +122,6 @@ function isPrFollowUpMessage(text: string): boolean {
     "when can this",
     "please review"
   ].some((phrase) => lower.includes(phrase));
-}
-
-async function findSuggestedAssignee(
-  guild: Guild,
-  input: NormalizedIssueInput,
-  cache: Map<string, { assigneeId: string | null; assigneeName: string | null }>
-): Promise<{ assigneeId: string | null; assigneeName: string | null }> {
-  const owner = classifyPrOwner(extractGithubPullUrl(`${input.summary} ${input.content}`));
-  if (!owner) {
-    return { assigneeId: null, assigneeName: null };
-  }
-  const cached = cache.get(owner);
-  if (cached) {
-    return cached;
-  }
-
-  const query = owner === "rohan" ? "rohan" : "ulysses";
-  const matches = await guild.members.search({ query, limit: 10 }).catch(() => null);
-  const member = matches?.find((candidate) => {
-    const display = candidate.displayName.toLowerCase();
-    const username = candidate.user.username.toLowerCase();
-    return display.includes(query) || username.includes(query);
-  });
-
-  if (!member) {
-    const result = { assigneeId: null, assigneeName: owner };
-    cache.set(owner, result);
-    return result;
-  }
-
-  const result = {
-    assigneeId: member.id,
-    assigneeName: member.displayName || member.user.username
-  };
-  cache.set(owner, result);
-  return result;
 }
 
 function groupMessagesByChannel(messages: FetchedMessage[]): Map<string, FetchedMessage[]> {
@@ -306,7 +256,6 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
     );
     const messagesById = buildMessageLookup(fetched.messages);
     const messagesByChannel = groupMessagesByChannel(fetched.messages);
-    const assigneeCache = new Map<string, { assigneeId: string | null; assigneeName: string | null }>();
     const githubCache = new Map<string, Promise<GithubEnrichment | null>>();
     const baseKnownHandlerIds = new Set<string>([
       interaction.guild.ownerId,
@@ -403,9 +352,6 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
         scanId
       };
 
-      const suggestedAssignee = await findSuggestedAssignee(interaction.guild, normalized, assigneeCache);
-      normalized.assigneeId = suggestedAssignee.assigneeId;
-      normalized.assigneeName = suggestedAssignee.assigneeName;
       if (isIgnoredCandidate(interaction.guildId, normalized.authorId, normalized.category, normalized.summary)) {
         logDebug("scan.issue.ignored", {
           scanId,
@@ -426,8 +372,7 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
         category: normalized.category,
         urgency: normalized.urgency,
         messageId: normalized.messageId,
-        relatedMessageIds: allMessages.map((message) => message.messageId),
-        suggestedAssigneeId: normalized.assigneeId ?? null
+        relatedMessageIds: allMessages.map((message) => message.messageId)
       });
       scannedItemIds.add(itemId);
       const githubUrl = extractGithubUrl(`${normalized.content} ${normalized.summary}`);
