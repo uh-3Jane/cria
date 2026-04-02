@@ -82,7 +82,25 @@ export function likelySameTopic(left: string, right: string): boolean {
 export function extractReference(text: string): string | null {
   const url = text.match(/https?:\/\/\S+/)?.[0];
   if (url) {
-    return url.toLowerCase();
+    try {
+      const parsed = new URL(url);
+      const segments = parsed.pathname.split("/").filter(Boolean).map((segment) => segment.toLowerCase());
+      const lastSegment = segments[segments.length - 1] ?? null;
+      const hostname = parsed.hostname.toLowerCase();
+      if (hostname.endsWith("defillama.com")) {
+        if (segments.length >= 2 && ["protocol", "yields", "dexs", "chains", "fees"].includes(segments[0]) && lastSegment) {
+          return `entity:${lastSegment}`;
+        }
+      }
+      if (hostname.endsWith("dune.com")) {
+        if (lastSegment && lastSegment.includes("-")) {
+          return `entity:${lastSegment}`;
+        }
+      }
+      return url.toLowerCase();
+    } catch {
+      return url.toLowerCase();
+    }
   }
   const pr = text.match(/#\d+/)?.[0];
   if (pr) {
