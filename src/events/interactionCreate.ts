@@ -11,7 +11,7 @@ import {
 import { assertAdmin } from "../access";
 import { handleAdmin, handleCategory, handleConfig, handleCria, handleIssue, handleIssuesCommand, handleReopen, handleSimpleList, handleUnsnooze } from "../commands/issues";
 import { runScan } from "../commands/scan";
-import { assignItem, getActiveCategoryNames, getItem, getItems, markItemFalsePositive, recategorizeItem, resolveItem, reopenItem, snoozeItem, unsnoozeItem } from "../issues/store";
+import { assignItem, getActiveCategoryNames, getItem, getItems, markItemAlreadyHandled, markItemFalsePositive, recategorizeItem, resolveItem, reopenItem, snoozeItem, unsnoozeItem } from "../issues/store";
 import { getDigestSession, itemCardPayload, renderIssuePage, replaceSessionCards, setDigestPage, summaryMessagePayload } from "../issues/digest";
 import { logDebug, logError } from "../utils/logger";
 
@@ -234,6 +234,12 @@ async function handleButton(interaction: ButtonInteraction): Promise<void> {
   if (action === "falsepositive") {
     logDebug("interaction.button.false_positive", { itemId, guildId: interaction.guildId, userId: interaction.user.id, interactionMessageId: interaction.message.id });
     markItemFalsePositive(itemId, interaction.guildId, interaction.user.id, interaction.user.username);
+    await refreshItemCard(interaction, itemId);
+    return;
+  }
+  if (action === "alreadyhandled") {
+    logDebug("interaction.button.already_handled", { itemId, guildId: interaction.guildId, userId: interaction.user.id, interactionMessageId: interaction.message.id });
+    markItemAlreadyHandled(itemId, interaction.guildId, interaction.user.id, interaction.user.username);
     await refreshItemCard(interaction, itemId);
     return;
   }

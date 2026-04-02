@@ -5,11 +5,11 @@ import { enrichGithubUrl } from "../integrations/github";
 import { fetchGuildMessages, listScanChannels } from "../scanner/fetcher";
 import { attachEvidenceMessages, createScan, failScan, finalizeScan, getActiveCategoryNames, getChannelScanCursors, getOpenItemsInLookback, getScanChannel, getSkippableChatEngagedMessageIds, isIgnoredCandidate, listAdmins, listAllCategoryAssigneeIds, recordScannedMessages, recoverStaleScans, updateChannelScanCursors, updateItemGithubMetadata, updateItemTraceState, upsertIssue, updateHumanReply } from "../issues/store";
 import { bindSummaryMessage, createDigestSession, replaceSessionCards, summaryMessagePayload } from "../issues/digest";
-import { triageConversationTrace, type TraceTriageMessage } from "../scanner/traceTriage";
+import { triageConversationTrace, type TraceTriageMessage, type TraceTriageResult } from "../scanner/traceTriage";
 import { TRACE_ANALYSIS_VERSION, computeTraceFingerprint, getCachedTraceAnalysis, linkTraceToItem, upsertConversationTrace, upsertTraceAnalysisCache } from "../traces/store";
 import type { FetchedMessage, GithubEnrichment, ItemMessageRole, NormalizedIssueInput, RenderedItem, ScanSummary } from "../types";
 import { hoursFromPeriod } from "../utils/time";
-import { contentFingerprint, extractGithubUrl, isLowSignalHelpMessage, likelySameTopic, preview } from "../utils/text";
+import { contentFingerprint, extractGithubUrl, extractReference, isLowSignalHelpMessage, likelySameTopic, preview } from "../utils/text";
 import { logDebug, logError, logInfo } from "../utils/logger";
 
 const GITHUB_REFRESH_WINDOW_MS = 6 * 60 * 60 * 1000;
@@ -25,6 +25,7 @@ function isLlamaRoleName(name: string): boolean {
 }
 const TRACE_EVIDENCE_LIMIT = 12;
 const TRACE_EVIDENCE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const TRACE_CONTINUATION_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 const activeScans = new Map<string, { progressMessageId?: string; startedAt: number }>();
 
@@ -111,6 +112,168 @@ function buildConversationTraces(messages: FetchedMessage[]): ConversationTraceC
   }
 
   return traces;
+}
+
+function firstUserId(messages: TraceTriageMessage[]): string | null {
+  return messages.find((entry) => entry.role === "user")?.message.authorId ?? null;
+}
+
+function traceHasHandler(messages: TraceTriageMessage[]): boolean {
+  return messages.some((entry) => entry.role === "llama" || entry.role === "team");
+}
+
+function hasUrlLikeContext(text: string): boolean {
+  return /https?:\/\/\S+/i.test(text) || /#\d+/.test(text);
+}
+
+function sameExplicitReference(left: TraceTriageMessage[], right: TraceTriageMessage[]): boolean {
+  const leftRefs = new Set(left.map((entry) => extractReference(entry.message.content) ?? entry.message.referenceMessageId).filter((value): value is string => Boolean(value)));
+  const rightRefs = new Set(right.map((entry) => extractReference(entry.message.content) ?? entry.message.referenceMessageId).filter((value): value is string => Boolean(value)));
+  if (leftRefs.size === 0 || rightRefs.size === 0) {
+    return false;
+  }
+  for (const ref of leftRefs) {
+    if (rightRefs.has(ref)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasConflictingExplicitReference(left: TraceTriageMessage[], right: TraceTriageMessage[]): boolean {
+  const leftRefs = Array.from(new Set(left.map((entry) => extractReference(entry.message.content) ?? entry.message.referenceMessageId).filter((value): value is string => Boolean(value))));
+  const rightRefs = Array.from(new Set(right.map((entry) => extractReference(entry.message.content) ?? entry.message.referenceMessageId).filter((value): value is string => Boolean(value))));
+  return leftRefs.length > 0 && rightRefs.length > 0 && !sameExplicitReference(left, right);
+}
+
+function referencesAnyMessage(source: TraceTriageMessage[], target: TraceTriageMessage[]): boolean {
+  const targetIds = new Set(target.map((entry) => entry.message.messageId));
+  return source.some((entry) => entry.message.referenceMessageId && targetIds.has(entry.message.referenceMessageId));
+}
+
+function compactTraceMessages(messages: TraceTriageMessage[]): TraceTriageMessage[] {
+  const ordered = messages
+    .slice()
+    .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.message.messageId.localeCompare(right.message.messageId));
+  if (ordered.length <= TRACE_EVIDENCE_LIMIT) {
+    return ordered;
+  }
+
+  const selectedIds: string[] = [];
+  const add = (entry: TraceTriageMessage | null | undefined): void => {
+    if (!entry) {
+      return;
+    }
+    if (!selectedIds.includes(entry.message.messageId)) {
+      selectedIds.push(entry.message.messageId);
+    }
+  };
+
+  const firstIssue = ordered.find((entry) => entry.role === "user");
+  const latestUser = [...ordered].reverse().find((entry) => entry.role === "user");
+  const latestAnswer = [...ordered].reverse().find((entry) => entry.role === "llama" || entry.role === "team");
+  const latestUserAfterAnswer = latestAnswer
+    ? [...ordered].reverse().find((entry) => entry.role === "user" && Date.parse(entry.message.createdAt) > Date.parse(latestAnswer.message.createdAt))
+    : null;
+  const previousUserAfterAnswer = latestUserAfterAnswer
+    ? [...ordered]
+      .reverse()
+      .find((entry) => entry.role === "user" && entry.message.messageId !== latestUserAfterAnswer.message.messageId && Date.parse(entry.message.createdAt) > Date.parse(latestAnswer?.message.createdAt ?? ""))
+    : null;
+
+  add(firstIssue);
+  add(latestUser);
+  add(latestAnswer);
+  add(latestUserAfterAnswer);
+  add(previousUserAfterAnswer);
+  for (const entry of ordered) {
+    if (hasUrlLikeContext(entry.message.content)) {
+      add(entry);
+    }
+  }
+  for (const entry of ordered) {
+    if (selectedIds.length >= TRACE_EVIDENCE_LIMIT) {
+      break;
+    }
+    add(entry);
+  }
+
+  const chosen = new Set(selectedIds.slice(0, TRACE_EVIDENCE_LIMIT));
+  return ordered.filter((entry) => chosen.has(entry.message.messageId));
+}
+
+function mergeContinuationTraces(traces: TraceTriageMessage[][]): TraceTriageMessage[][] {
+  if (traces.length <= 1) {
+    return traces.map((trace) => compactTraceMessages(trace));
+  }
+
+  const merged: TraceTriageMessage[][] = [];
+  for (const candidate of traces) {
+    const orderedCandidate = candidate
+      .slice()
+      .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.message.messageId.localeCompare(right.message.messageId));
+    const lastMerged = merged[merged.length - 1];
+    if (!lastMerged) {
+      merged.push(orderedCandidate);
+      continue;
+    }
+
+    const lastMessage = lastMerged[lastMerged.length - 1];
+    const firstCandidate = orderedCandidate[0];
+    const sameChannel = Boolean(lastMessage && firstCandidate && lastMessage.message.channelId === firstCandidate.message.channelId);
+    const nearInTime = Boolean(
+      lastMessage
+      && firstCandidate
+      && Math.abs(Date.parse(firstCandidate.message.createdAt) - Date.parse(lastMessage.message.createdAt)) <= TRACE_CONTINUATION_WINDOW_MS
+    );
+    const openerUserId = firstUserId(lastMerged);
+    const candidateContainsOpener = openerUserId
+      ? orderedCandidate.some((entry) => entry.role === "user" && entry.message.authorId === openerUserId)
+      : false;
+    const shouldMerge = sameChannel
+      && nearInTime
+      && (traceHasHandler(lastMerged) || traceHasHandler(orderedCandidate))
+      && !hasConflictingExplicitReference(lastMerged, orderedCandidate)
+      && (
+        candidateContainsOpener
+        || referencesAnyMessage(orderedCandidate, lastMerged)
+        || referencesAnyMessage(lastMerged, orderedCandidate)
+        || sameExplicitReference(lastMerged, orderedCandidate)
+      );
+
+    if (shouldMerge) {
+      const combined = [...lastMerged];
+      for (const entry of orderedCandidate) {
+        if (!combined.some((existing) => existing.message.messageId === entry.message.messageId)) {
+          combined.push(entry);
+        }
+      }
+      merged[merged.length - 1] = combined.sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.message.messageId.localeCompare(right.message.messageId));
+      continue;
+    }
+
+    merged.push(orderedCandidate);
+  }
+
+  return merged.map((trace) => compactTraceMessages(trace));
+}
+
+function cheapTraceFloor(messages: TraceTriageMessage[], allowedCategories: string[]): TraceTriageResult | null {
+  const userMessages = messages.filter((entry) => entry.role === "user");
+  const answer = [...messages].reverse().find((entry) => entry.role === "llama" || entry.role === "team") ?? null;
+  if (userMessages.length === 0) {
+    return {
+      traceKind: "non_actionable",
+      traceState: answer ? "likely_handled" : "unclear",
+      primaryIssueMessageId: null,
+      strongestAnswerMessageId: answer?.message.messageId ?? null,
+      category: allowedCategories.includes("general") ? "general" : allowedCategories[0] ?? "general",
+      urgency: "low",
+      confidence: "high",
+      reasonTags: ["no_user_issue_message"]
+    };
+  }
+  return null;
 }
 
 function extractGithubPullUrl(text: string): URL | null {
@@ -303,7 +466,7 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
     );
     const messagesSkippedAsChatEngaged = fetched.messages.filter((message) => chatEngagedSkippableIds.has(message.messageId));
     const messagesForTraceTriage = fetched.messages.filter((message) => !chatEngagedSkippableIds.has(message.messageId));
-    const traceCandidates = buildConversationTraces(messagesForTraceTriage);
+    const seedTraceCandidates = buildConversationTraces(messagesForTraceTriage);
     let messagesReused = 0;
     let messagesAnalyzed = 0;
     logDebug("scan.fetch.complete", {
@@ -312,45 +475,56 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
       channelsScanned: fetched.channelsScanned,
       skippedChannels: fetched.skippedChannels,
       messagesFetched: fetched.messages.length,
-      traceCandidates: traceCandidates.length,
+      traceCandidates: seedTraceCandidates.length,
       messagesSkippedAsChatEngaged: messagesSkippedAsChatEngaged.length,
       analysisVersion: TRACE_ANALYSIS_VERSION
     });
-    await updateProgress(
-      interaction,
-      `scanning last ${lookbackHours}h...\nfetched ${fetched.messages.length.toLocaleString()} messages from ${fetched.channelsScanned} channels.\nbuilt ${traceCandidates.length.toLocaleString()} conversation traces.\nskipped ${messagesSkippedAsChatEngaged.length.toLocaleString()} chat-engaged messages.\nresults: ${outputLabel}`
-    );
-
-    let itemsNew = 0;
-    let itemsReturning = 0;
-    const newItemIds = new Set<number>();
-    const itemIdsByMessageId = new Map<string, number>();
     const memberRoleCache = new Map<string, Promise<ItemMessageRole>>();
-    for (let index = 0; index < traceCandidates.length; index += 1) {
-      const traceCandidate = traceCandidates[index];
-      const traceMessages = traceCandidate.messages;
-      if (traceMessages.length === 0) {
-        continue;
-      }
-      const knownHandlerIds = new Set(baseKnownHandlerIds);
+    const seedTraceMessages: TraceTriageMessage[][] = [];
+    for (const traceCandidate of seedTraceCandidates) {
       const triageMessages: TraceTriageMessage[] = [];
-      for (const message of traceMessages) {
+      for (const message of traceCandidate.messages) {
         triageMessages.push({
           message,
           role: await classifyTraceParticipantRole({
             guild: interaction.guild,
             authorId: message.authorId,
-            knownHandlerIds,
+            knownHandlerIds: baseKnownHandlerIds,
             roleCache: memberRoleCache
           })
         });
       }
-      const traceFingerprint = computeTraceFingerprint(traceMessages);
+      seedTraceMessages.push(triageMessages);
+    }
+    const traceCandidates = mergeContinuationTraces(seedTraceMessages);
+    await updateProgress(
+      interaction,
+      `scanning last ${lookbackHours}h...\nfetched ${fetched.messages.length.toLocaleString()} messages from ${fetched.channelsScanned} channels.\nbuilt ${traceCandidates.length.toLocaleString()} conversation traces.\nskipped ${messagesSkippedAsChatEngaged.length.toLocaleString()} chat-engaged messages.\nresults: ${outputLabel}`
+    );
+    let itemsNew = 0;
+    let itemsReturning = 0;
+    const newItemIds = new Set<number>();
+    const itemIdsByMessageId = new Map<string, number>();
+    for (let index = 0; index < traceCandidates.length; index += 1) {
+      const traceCandidate = traceCandidates[index];
+      const triageMessages = traceCandidate;
+      const traceMessages = triageMessages.map((entry) => entry.message);
+      if (traceMessages.length === 0) {
+        continue;
+      }
+      const traceFingerprint = computeTraceFingerprint(triageMessages.map((entry) => ({
+        channelId: entry.message.channelId,
+        messageId: entry.message.messageId,
+        authorId: entry.message.authorId,
+        content: entry.message.content,
+        role: entry.role
+      })));
       const cachedAnalysis = getCachedTraceAnalysis({
         guildId: interaction.guildId,
         traceFingerprint,
         analysisVersion: TRACE_ANALYSIS_VERSION
       });
+      const floored = cheapTraceFloor(triageMessages, activeCategories);
       const triage = cachedAnalysis
         ? {
             traceKind: cachedAnalysis.trace_kind,
@@ -362,6 +536,8 @@ export async function runScan(interaction: ChatInputCommandInteraction): Promise
             confidence: cachedAnalysis.confidence,
             reasonTags: cachedAnalysis.reason_tags ? cachedAnalysis.reason_tags.split(",").filter(Boolean) : []
           }
+        : floored
+        ? floored
         : await triageConversationTrace({
             guildId: interaction.guildId,
             messages: triageMessages,

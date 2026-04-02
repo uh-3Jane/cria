@@ -1318,6 +1318,17 @@ function buildItemLearningPayload(itemId: number, guildId: string): {
   const relatedMessages = getItemMessages(itemId);
   const issueMessages = relatedMessages.filter((message) => message.evidence_kind === "issue");
   const evidenceMessages = relatedMessages.filter((message) => message.evidence_kind === "evidence");
+  const answerAtMs = item.trace_answer_at ? Date.parse(item.trace_answer_at) : Number.NaN;
+  const latestPostAnswerFollowUp = Number.isFinite(answerAtMs)
+    ? [...relatedMessages]
+      .reverse()
+      .find((message) =>
+        message.message_role === "user"
+        && message.author_id === item.author_id
+        && message.source_message_created_at
+        && Date.parse(message.source_message_created_at) > answerAtMs
+      ) ?? null
+    : null;
   const inputParts = issueMessages
     .map((message) => message.content_preview?.trim())
     .filter((value): value is string => Boolean(value));
@@ -1335,6 +1346,7 @@ function buildItemLearningPayload(itemId: number, guildId: string): {
       `trace_state_confidence: ${item.trace_state_confidence}`,
       item.trace_answer_author_name ? `trace_answer_by: ${item.trace_answer_author_name}` : null,
       item.trace_answer_text ? `trace_answer_text: ${item.trace_answer_text}` : null,
+      latestPostAnswerFollowUp?.content_preview ? `post_answer_follow_up_text: ${latestPostAnswerFollowUp.content_preview}` : null,
       item.last_human_reply_name ? `last_human_reply_by: ${item.last_human_reply_name}` : null,
       item.last_human_reply_text ? `last_human_reply_text: ${item.last_human_reply_text}` : null,
       item.linked_llama_reply_author_name ? `linked_llama_reply_by: ${item.linked_llama_reply_author_name}` : null,
@@ -1521,6 +1533,60 @@ export function resolveItem(itemId: number, guildId: string, actorId: string, ac
     }
   }
   writeAuditLog({ guildId, actorId, actorName, action: "resolve", target: String(itemId) });
+}
+
+export function markItemAlreadyHandled(itemId: number, guildId: string, actorId: string, actorName: string): void {
+  const learning = buildItemLearningPayload(itemId, guildId);
+  db.query(
+    `UPDATE items
+        SET status = 'resolved',
+            outcome_label = 'already_handled',
+            resolved_at = CURRENT_TIMESTAMP,
+            resolved_by = ?,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND guild_id = ?`
+  ).run(actorName, itemId, guildId);
+  const relatedMessageIds = learning?.relatedMessageIds ?? (db.query(
+    `SELECT message_id
+       FROM item_messages
+      WHERE item_id = ?`
+  ).all(itemId) as Array<{ message_id: string }>).map((row) => row.message_id);
+  reinforceKnowledgeFromResolvedMessages(guildId, relatedMessageIds);
+  if (learning) {
+    recordValidatedOutcomeForLearning({
+      guildId,
+      itemId,
+      learning,
+      outcomeLabel: "already_handled",
+      weight: 9
+    });
+    const handledSummary = learning.item.trace_answer_text
+      ? `already_handled: ${learning.item.trace_answer_text}`
+      : learning.item.linked_llama_reply_text
+      ? `already_handled: ${learning.item.linked_llama_reply_text}`
+      : learning.item.last_human_reply_text
+      ? `already_handled after human reply: ${learning.item.last_human_reply_text}`
+      : `already_handled: ${learning.item.summary}`;
+    try {
+      recordLearningFeedback({
+        guildId,
+        domain: "scan_resolution",
+        inputText: learning.inputText,
+        contextText: learning.contextText,
+        initialOutput: "open",
+        correctedOutput: handledSummary,
+        feedbackKind: "confirmed",
+        weight: 9,
+        itemId,
+        traceId: learning.item.conversation_trace_id,
+        sourceMessageId: relatedMessageIds[0] ?? learning.item.message_id,
+        relatedMessageId: learning.item.message_id
+      });
+    } catch (error) {
+      logError("issues.already_handled.learning.failed", error, { guildId, itemId });
+    }
+  }
+  writeAuditLog({ guildId, actorId, actorName, action: "already_handled", target: String(itemId) });
 }
 
 export function reopenItem(itemId: number, guildId: string, actorId: string, actorName: string): void {

@@ -15,7 +15,7 @@ import type {
 } from "../types";
 import { contentFingerprint, preview, sharedTokenCount } from "../utils/text";
 
-export const TRACE_ANALYSIS_VERSION = "trace_triage_v1_2026_04_01";
+export const TRACE_ANALYSIS_VERSION = "trace_triage_v2_2026_04_02";
 
 type CacheArgs = {
   guildId: string;
@@ -157,11 +157,11 @@ function rowToValidatedTraceMemory(row: Record<string, unknown>): ValidatedTrace
   };
 }
 
-export function computeTraceFingerprint(messages: Array<Pick<FetchedMessage, "channelId" | "messageId" | "authorId" | "content">>): string {
+export function computeTraceFingerprint(messages: Array<Pick<FetchedMessage, "channelId" | "messageId" | "authorId" | "content"> & { role?: ItemMessageRole | null }>): string {
   const ordered = messages
     .slice()
     .sort((left, right) => left.messageId.localeCompare(right.messageId))
-    .map((message) => `${message.channelId}:${message.messageId}:${message.authorId}:${contentFingerprint(message.content)}`)
+    .map((message) => `${message.channelId}:${message.messageId}:${message.authorId}:${message.role ?? "unknown"}:${contentFingerprint(message.content)}`)
     .join("\n");
   return contentFingerprint(ordered);
 }
@@ -452,10 +452,10 @@ export function findValidatedTraceMatches(args: {
   const parsed = rows.map(rowToValidatedTraceMemory);
 
   return parsed
-    .filter((row) => row.outcome_label === "resolved" && row.strongest_answer_text && row.strongest_answer_text.trim().length > 0)
+    .filter((row) => (row.outcome_label === "resolved" || row.outcome_label === "already_handled") && row.strongest_answer_text && row.strongest_answer_text.trim().length > 0)
     .map((row) => {
       const confirmationCount = parsed.filter((candidate) =>
-        candidate.outcome_label === "resolved"
+        (candidate.outcome_label === "resolved" || candidate.outcome_label === "already_handled")
         && candidate.strongest_answer_text
         && row.strongest_answer_text
         && sharedTokenCount(row.strongest_answer_text, candidate.strongest_answer_text) >= 2
